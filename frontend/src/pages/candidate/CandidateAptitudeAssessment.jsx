@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Clock, CheckCircle, AlertCircle, Award } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import useProctoring from '../../hooks/useProctoring';
+import useFaceProctoring from '../../hooks/useFaceProctoring';
+import useFullscreen from '../../hooks/useFullscreen';
 import API_URL from '../../apiConfig';
 
 const CandidateAptitudeAssessment = () => {
@@ -22,67 +24,215 @@ const CandidateAptitudeAssessment = () => {
 
     const [timeLeft, setTimeLeft] = useState(getDuration());
     const [submitted, setSubmitted] = useState(false);
+    const [scoreResult, setScoreResult] = useState(null);
 
-    // Proctoring Integration
     const [showWarning, setShowWarning] = useState(false);
     const [warningMessage, setWarningMessage] = useState('');
+    const [warningKey, setWarningKey] = useState(0);
+    const [violationCount, setViolationCount] = useState(0); // Unified display count
+    const [showTerminalOverlay, setShowTerminalOverlay] = useState(false);
+    const [terminalMessage, setTerminalMessage] = useState('');
+    const [detectionStatus, setDetectionStatus] = useState('idle');
+    const [boxes, setBoxes] = useState([]);
+    const boxTimerRef = useRef(null);
+    const warningTimerRef = useRef(null);
+    const totalViolationsRef = useRef(0); // Unified ref — always current (no stale closure)
+    const terminalFiredRef = useRef(false); // Prevent double-submit
+    const handleSubmitRef = useRef(null);   // Always points to latest handleSubmit
+    const MAX_VIOLATIONS = 3;
 
-    const { violations } = useProctoring({
-        enabled: !loading && !submitted,
-        maxViolations: 3,
-        onViolation: (reason, count) => {
-            setWarningMessage(`Malpractice Detected: ${reason}. This attempt has been logged.`);
-            setShowWarning(true);
-            setTimeout(() => setShowWarning(false), 5000); // Auto-hide warning after 5s
-        },
-        onTerminalViolation: (reason) => {
-            handleSubmit(`Malpractice - ${reason}`);
-            setTerminalMessage(`Maximum violations reached (${reason}). Your assessment has been submitted automatically.`);
-            setShowTerminalOverlay(true);
+    // Camera-specific human-friendly messages
+    const getCameraViolationMessage = (reason) => {
+        if (reason.includes('Face not visible') || reason.includes('no_person')) {
+            return '⚠️ Your face is not visible in the camera. Please ensure your face is clearly in frame.';
+        }
+        if (reason.includes('Multiple persons') || reason.includes('multiple_persons')) {
+            return '🚨 Multiple people detected in your camera. Only you should be visible during the assessment.';
+        }
+        if (reason.includes('Mobile phone') || reason.includes('phone')) {
+            return '📵 Mobile phone detected in your camera. Please remove all devices from view.';
+        }
+        if (reason.includes('Electronic device') || reason.includes('device')) {
+            return '💻 Electronic device detected in your camera. Please remove it from view immediately.';
+        }
+        if (reason.includes('Reference material') || reason.includes('notes')) {
+            return '📖 Reference material or notes detected in your camera. Please clear your workspace.';
+        }
+        if (reason.includes('Tab') || reason.includes('Focus') || reason.includes('Shortcut') || reason.includes('Copy')) {
+            return `🖥️ Malpractice detected: ${reason}. Please stay on the assessment screen.`;
+        }
+        return `⚠️ Violation detected: ${reason}`;
+    };
+
+    // ── UNIFIED violation handler ──────────────────────────────────────────────
+    // Called by BOTH useProctoring (tab switch) and useFaceProctoring (camera)
+    const handleAnyViolation = useCallback((reason) => {
+        if (terminalFiredRef.current) return; // Already submitted — ignore
+
+        totalViolationsRef.current += 1;
+        const count = totalViolationsRef.current;
+        setViolationCount(count);
+
+        const msg = getCameraViolationMessage(reason);
+
+        // Always show the warning banner (even on 3rd = final)
+        if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+        setWarningMessage(msg);
+        setWarningKey(prev => prev + 1);
+        setShowWarning(true);
+
+        if (count < MAX_VIOLATIONS) {
+            // Non-terminal: auto-hide banner after 6s
+            warningTimerRef.current = setTimeout(() => setShowWarning(false), 6000);
+        } else {
+            // Terminal (3rd violation): show warning 4s, then auto-submit
+            terminalFiredRef.current = true;
+            warningTimerRef.current = setTimeout(() => {
+                setShowWarning(false);
+                setTerminalMessage(`3 violations recorded (${reason}). Your assessment has been submitted automatically.`);
+                setShowTerminalOverlay(true);
+                // Use ref so we always call the LATEST handleSubmit (no stale closure)
+                if (handleSubmitRef.current) handleSubmitRef.current(`Malpractice - ${reason}`);
+            }, 4000);
+        }
+    }, []);
+
+    const [securityConfig, setSecurityConfig] = useState({
+        faceProctoring: true,
+        fullscreenProctoring: true
+    });
+
+    useEffect(() => {
+        const token = localStorage.getItem('candidateToken') || localStorage.getItem('token');
+        fetch(`${API_URL}/api/settings/`, {
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.security) {
+                    setSecurityConfig(data.security);
+                }
+            })
+            .catch(err => console.error("Failed to load security settings", err));
+    }, []);
+
+    // Fullscreen enforcement
+    const { reEnter: reEnterFullscreen } = useFullscreen({
+        enabled: !loading && !submitted && securityConfig.fullscreenProctoring,
+        onExit: () => {
+            handleAnyViolation('Fullscreen exited — please stay in fullscreen during the assessment');
+            // Try to pull them back into fullscreen after a short delay
+            setTimeout(reEnterFullscreen, 2000);
         }
     });
 
-    const [scoreResult, setScoreResult] = useState(null); // To store result after submission
-    const [showTerminalOverlay, setShowTerminalOverlay] = useState(false);
-    const [terminalMessage, setTerminalMessage] = useState('');
+    // Tab/keyboard proctoring — pass unified handler, disable internal terminal
+    const { violations } = useProctoring({
+        enabled: !loading && !submitted,
+        maxViolations: 999, // We handle terminal ourselves
+        onViolation: handleAnyViolation,
+        onTerminalViolation: () => {} // Disabled — handled by handleAnyViolation
+    });
 
-    // Load Context
-    useEffect(() => {
-        const assessmentData = localStorage.getItem('currentAssessment');
-        const assessment = assessmentData ? JSON.parse(assessmentData) : null;
+    // Silent background face detection — shares unified violation handler
+    const cameraVideoRef = useRef(null);
+    const { cameraStream, suspectLabel } = useFaceProctoring({
+        enabled: !loading && !submitted && securityConfig.faceProctoring,
+        onDetection: (status) => setDetectionStatus(status),
+        onDetections: (dets, faceBoxes) => {
+            const isSuspect = dets.some(d => d.class !== 'person');
+            const allBoxes = [];
 
-        if (!assessment) {
-            alert("No active assessment found.");
-            navigate('/portal/login');
-            return;
-        }
-
-        const config = assessment.config || {};
-
-        // SYNC FIX: Update Timer if different from initial state
-        if (config.duration) {
-            setTimeLeft((prev) => {
-                // Only update if significantly different (avoid reset on small re-renders)
-                // Actually, for a fresh load, we trust the config.
-                // For anti-cheat resume, we might need more logic, but user Asked for "Admin config duration".
-                return config.duration * 60;
+            // Face boxes — green normally, red when suspect also detected
+            (faceBoxes || []).forEach(fb => {
+                allBoxes.push({
+                    label: 'face',
+                    left:   `${(1 - fb[2]) * 100}%`,
+                    top:    `${fb[1] * 100}%`,
+                    width:  `${(fb[2] - fb[0]) * 100}%`,
+                    height: `${(fb[3] - fb[1]) * 100}%`,
+                    color:  isSuspect ? '#ef4444' : '#22c55e',
+                });
             });
-        }
 
-        // Check for Backend-Generated Questions (Real AI)
-        if (config.generated_questions && config.generated_questions.length > 0) {
-            console.log("Using Backend AI Generated Questions");
-            setQuestions(config.generated_questions);
+            // Suspicious object boxes — always red
+            dets.filter(d => d.class !== 'person' && d.bbox).forEach(d => {
+                allBoxes.push({
+                    label: d.class,
+                    left:   `${(1 - d.bbox[2]) * 100}%`,
+                    top:    `${d.bbox[1] * 100}%`,
+                    width:  `${(d.bbox[2] - d.bbox[0]) * 100}%`,
+                    height: `${(d.bbox[3] - d.bbox[1]) * 100}%`,
+                    color:  '#ef4444',
+                });
+            });
+
+            setBoxes(allBoxes);
+            if (boxTimerRef.current) clearTimeout(boxTimerRef.current);
+            boxTimerRef.current = setTimeout(() => setBoxes([]), 4000);
+        },
+        onViolation: handleAnyViolation  // Same unified handler
+    });
+
+    // Bind camera stream to preview video element
+    useEffect(() => {
+        if (cameraVideoRef.current && cameraStream) {
+            cameraVideoRef.current.srcObject = cameraStream;
+            cameraVideoRef.current.play().catch(() => {});
+        }
+    }, [cameraStream]);
+
+    // Load Context + Guard: check backend status first to prevent re-entry after submission
+    useEffect(() => {
+        const init = async () => {
+            const assessmentData = localStorage.getItem('currentAssessment');
+            const assessment = assessmentData ? JSON.parse(assessmentData) : null;
+
+            if (!assessment) {
+                navigate('/portal/login');
+                return;
+            }
+
+            // Check backend: is assessment already completed?
+            const token = localStorage.getItem('candidateToken');
+            if (token) {
+                try {
+                    const res = await fetch(`${API_URL}/api/assessments/my-status/`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data && data.status === 'completed') {
+                            // Assessment already done — clear and redirect
+                            localStorage.removeItem('currentAssessment');
+                            localStorage.removeItem('candidateToken');
+                            navigate('/portal/login');
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    // Network error on check — proceed to show test (fail-open)
+                    console.warn('[Assessment] Status check failed, proceeding:', e);
+                }
+            }
+
+            const config = assessment.config || {};
+
+            if (config.duration) {
+                setTimeLeft(config.duration * 60);
+            }
+
+            if (config.generated_questions && config.generated_questions.length > 0) {
+                setQuestions(config.generated_questions);
+                setLoading(false);
+                return;
+            }
+
+            console.warn("No questions found in config.");
             setLoading(false);
-            return;
-        }
+        };
 
-        // ... Existing Local Storage Check (Optional, but Backend is source of truth) ...
-        // If Backend didn't provide questions, it means lazy gen failed or is slow.
-        // We should encourage backend reliance to ensure SCORING INTEGRITY.
-        console.warn("No questions found in config. Local generation disabled.");
-        setLoading(false);
-
+        init();
     }, [navigate]);
 
     // Timer Logic
@@ -101,15 +251,20 @@ const CandidateAptitudeAssessment = () => {
         // Prevent double submission
         if (submitted) return;
 
-        // If forcedStatus is provided (proctoring auto-submit), set submitted true immediately to disable hook
-        if (forcedStatus) setSubmitted(true);
-
         const token = localStorage.getItem('candidateToken');
         if (!token) {
-            alert("Session expired. Please login again.");
+            if (!forcedStatus) alert("Session expired. Please login again.");
             navigate('/portal/login');
             return;
         }
+
+        // If proctoring auto-submit, clear everything and submit
+        if (forcedStatus) setSubmitted(true);
+
+        // Clear local storage IMMEDIATELY to prevent auto-resume/reload race conditions
+        localStorage.removeItem('currentAssessment');
+        localStorage.removeItem('candidateToken');
+        localStorage.removeItem('aptitudeQuestions');
 
         try {
             const response = await fetch(`${API_URL}/api/assessments/submit/`, {
@@ -124,25 +279,40 @@ const CandidateAptitudeAssessment = () => {
             if (response.ok) {
                 const data = await response.json();
                 setSubmitted(true);
-                // Capture Score Result directly from backend response for immediate display
-                // Backend returns 'score' (0-10) or we can parse status
                 if (data.score !== undefined) {
-                    setScoreResult(data.score * 10); // Convert to percentage
+                    setScoreResult(data.score * 10);
                 } else if (data.status && data.status.startsWith('Submitted:')) {
-                    // Fallback parse
                     const parts = data.status.split(': ')[1].split('/');
                     if (parts.length === 2) {
                         setScoreResult(Math.round((parseInt(parts[0]) / parseInt(parts[1])) * 100));
                     }
                 }
+            } else if (response.status === 401) {
+                if (!forcedStatus) {
+                    alert('Your session has expired. Please log in again to continue.');
+                    navigate('/portal/login');
+                }
+            } else if (response.status === 400) {
+                // 400 = "Assessment already submitted" — treat as success
+                console.warn('[Submit] Assessment was already submitted — ignoring duplicate.');
+                setSubmitted(true);
             } else {
-                alert("Failed to submit assessment. Please try again.");
+                if (forcedStatus) {
+                    console.error('[Malpractice Submit] Backend returned:', response.status);
+                } else {
+                    alert("Failed to submit assessment. Please try again.");
+                }
             }
         } catch (error) {
             console.error("Submission error:", error);
-            alert("Network error. Please check connection.");
+            if (!forcedStatus) {
+                alert("Network error. Please check connection.");
+            }
         }
     };
+
+    // Keep handleSubmitRef always pointing to latest handleSubmit
+    handleSubmitRef.current = handleSubmit;
     // ANTI-MALPRACTICE: Prevent Back Button / Refresh (Handled by useProctoring, keeping keepalive sync for hard exits)
     useEffect(() => {
         const handleUnload = (e) => {
@@ -267,21 +437,129 @@ const CandidateAptitudeAssessment = () => {
 
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
+
+            {/* ── Camera Widget — top-right ── */}
+            <div style={{ position: 'fixed', top: '68px', right: '14px', zIndex: 40 }}>
+
+                {/* Bounding box — solid colored border */}
+                <div style={{
+                    position: 'relative',
+                    borderRadius: '10px',
+                    overflow: 'hidden',
+                    width: '220px',
+                    height: '165px',
+                    background: '#111',
+                    border: suspectLabel ? '3px solid #ef4444' : '3px solid #22c55e',
+                    boxShadow: suspectLabel
+                        ? '0 0 0 1px #ef4444, 0 0 20px rgba(239,68,68,0.6)'
+                        : '0 0 0 1px #16a34a, 0 4px 20px rgba(0,0,0,0.25)',
+                    animation: suspectLabel ? 'suspectBlink 0.7s ease-in-out infinite alternate' : 'none',
+                    transition: 'border-color 0.3s ease, box-shadow 0.3s ease'
+                }}>
+                    <video ref={cameraVideoRef} autoPlay playsInline muted
+                        style={{ width: '100%', height: '100%', display: 'block', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+
+                    {/* Bounding box divs — positioned over video */}
+                    {boxes.map((box, i) => (
+                        <div key={i} style={{
+                            position: 'absolute',
+                            left: box.left,
+                            top: box.top,
+                            width: box.width,
+                            height: box.height,
+                            border: `2.5px solid ${box.color}`,
+                            boxShadow: `0 0 8px ${box.color}88`,
+                            pointerEvents: 'none',
+                            boxSizing: 'border-box',
+                            borderRadius: '2px',
+                        }}>
+                            {/* Small label only for suspicious items (not face) */}
+                            {box.label !== 'face' && (
+                                <span style={{
+                                    position: 'absolute', bottom: '-18px', left: '-1px',
+                                    background: box.color, color: '#fff',
+                                    fontSize: '8px', fontWeight: 700,
+                                    padding: '1px 4px', borderRadius: '0 0 3px 3px',
+                                    whiteSpace: 'nowrap',
+                                }}>
+                                    {box.label}
+                                </span>
+                            )}
+                        </div>
+                    ))}
+
+                    {/* LIVE / ALERT badge */}
+                    <div style={{ position: 'absolute', top: '7px', left: '7px', display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.7)', padding: '3px 8px', borderRadius: '20px' }}>
+                        <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: suspectLabel ? '#ef4444' : '#4ade80', animation: 'livePulse 1.2s ease-in-out infinite' }} />
+                        <span style={{ color: '#fff', fontSize: '9px', fontWeight: 700, letterSpacing: '0.07em' }}>{suspectLabel ? 'ALERT' : 'LIVE'}</span>
+                    </div>
+
+                    {/* Red tint overlay when suspect */}
+                    {suspectLabel && (
+                        <div style={{ position: 'absolute', inset: 0, background: 'rgba(239,68,68,0.15)', pointerEvents: 'none' }} />
+                    )}
+                </div>
+
+                {/* Status label — only show when suspect detected */}
+                {suspectLabel && (
+                    <div style={{
+                        marginTop: '5px', textAlign: 'center', padding: '4px 8px', borderRadius: '8px',
+                        background: '#fef2f2', border: '2px solid #fca5a5', transition: 'all 0.3s ease'
+                    }}>
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: '#dc2626' }}>
+                            {suspectLabel}
+                        </span>
+                    </div>
+                )}
+
+                <style>{`
+                    @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+                    @keyframes suspectBlink { from{border-color:#ef4444;box-shadow:0 0 0 1px #ef4444,0 0 20px rgba(239,68,68,0.5)} to{border-color:#dc2626;box-shadow:0 0 0 1px #dc2626,0 0 28px rgba(239,68,68,0.9)} }
+                `}</style>
+            </div>
+
             {/* Warning Banner */}
-            <AnimatePresence>
+            <AnimatePresence mode="wait">
                 {showWarning && (
                     <motion.div
-                        initial={{ opacity: 0, y: -50 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -50 }}
-                        className="fixed top-0 left-0 right-0 z-50 bg-red-600 text-white px-6 py-4 shadow-2xl"
+                        key={warningKey}
+                        initial={{ opacity: 0, y: -60, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -60, scale: 0.97 }}
+                        transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+                        className="fixed top-0 left-0 right-0 z-50 shadow-2xl"
+                        style={{
+                            background: violationCount >= MAX_VIOLATIONS
+                                ? 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'
+                                : 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)',
+                            borderBottom: '3px solid #fca5a5'
+                        }}
                     >
-                        <div className="max-w-5xl mx-auto flex items-center gap-4">
-                            <AlertCircle size={28} className="flex-shrink-0 animate-pulse" />
-                            <div className="flex-1">
-                                <p className="font-bold text-lg">{warningMessage}</p>
-                                <p className="text-sm text-red-100 mt-1">Warning: {violations}/3 - Further violations will result in automatic submission.</p>
+                        <div className="max-w-5xl mx-auto px-6 py-4 flex items-start gap-4">
+                            <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center flex-shrink-0 animate-pulse mt-0.5">
+                                <AlertCircle size={22} className="text-white" />
                             </div>
+                            <div className="flex-1">
+                                <p className="font-bold text-white text-base leading-snug">{warningMessage}</p>
+                                <div className="flex items-center gap-3 mt-2">
+                                    <span className="text-red-200 text-sm font-semibold">Warning {violationCount}/{MAX_VIOLATIONS}</span>
+                                    {violationCount >= MAX_VIOLATIONS ? (
+                                        <span className="text-yellow-200 text-xs font-bold animate-pulse">
+                                            🚨 Submitting automatically in 4 seconds...
+                                        </span>
+                                    ) : (
+                                        <span className="text-red-300 text-xs">• {MAX_VIOLATIONS - violationCount} more violation(s) will auto-submit your assessment</span>
+                                    )}
+                                </div>
+                            </div>
+                            {/* Only allow dismiss on non-terminal warnings */}
+                            {violationCount < MAX_VIOLATIONS && (
+                                <button
+                                    onClick={() => setShowWarning(false)}
+                                    className="text-white/60 hover:text-white text-xl ml-2 leading-none flex-shrink-0"
+                                    style={{ marginTop: '2px' }}
+                                >✕</button>
+                            )}
                         </div>
                     </motion.div>
                 )}

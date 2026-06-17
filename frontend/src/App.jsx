@@ -8,6 +8,7 @@ import AptitudeRound from './pages/AptitudeRound';
 import RecruitmentRoundsManager from './pages/RecruitmentRoundsManager';
 import Candidates from './pages/Candidates';
 import ScreenedCandidates from './pages/ScreenedCandidates';
+import Analytics from './pages/Analytics';
 import AuthLayout from './layouts/AuthLayout';
 import DashboardLayout from './layouts/DashboardLayout';
 import CandidateLayout from './layouts/CandidateLayout';
@@ -47,6 +48,7 @@ function App() {
                         <Route path="/aptitude-round" element={<AptitudeRound />} />
                         <Route path="/technical-interview" element={<TechnicalInterview />} />
                         <Route path="/candidates" element={<Candidates />} />
+                        <Route path="/analytics" element={<Analytics />} />
                         <Route path="/settings" element={<GlobalSettings />} />
                     </Route>
 

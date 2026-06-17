@@ -54,11 +54,8 @@ def evaluate_interview_transcript(transcript: list, candidate_name: str, role: s
             elif isinstance(msg, str):
                 conversation += f"{msg}\n"
     except Exception as e:
-        print(f"DEBUG: Transcript parsing error: {e}")
+        print(f"Transcript parsing error: {e}")
         conversation = str(transcript)
-    
-    print(f"DEBUG: Formatted conversation for AI (first 100 chars): {conversation[:100]}...")
-    print(f"DEBUG: User messages found: {len(user_messages)}")
     
     evaluation_prompt = f"""
 You are an expert technical recruiter evaluating an interview transcript.

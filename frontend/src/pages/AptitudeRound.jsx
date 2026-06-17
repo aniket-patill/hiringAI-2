@@ -83,9 +83,30 @@ const AptitudeRound = () => {
         }
     };
 
+    const handleDelete = async (candidateIds) => {
+        if (!candidateIds || candidateIds.length === 0) return;
+        if (!window.confirm(`Permanently delete ${candidateIds.length} selected candidate(s)? This cannot be undone.`)) return;
+
+        try {
+            setLoading(true);
+            await Promise.all(candidateIds.map(id =>
+                fetch(`${API_URL}/api/resume/candidates/${id}/`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                })
+            ));
+            alert('Candidates deleted successfully');
+            fetchCandidates();
+        } catch (err) {
+            console.error("Deletion failed", err);
+            alert("Failed to delete candidates");
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 pb-12">
-            <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+            <div className="w-full space-y-6">
                 {/* Header Section */}
                 <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
                     <div className="flex justify-between items-start">
@@ -116,6 +137,7 @@ const AptitudeRound = () => {
                     onRefresh={fetchCandidates}
                     showRoleColumn={true}
                     onPromote={handlePromote}
+                    onDelete={handleDelete}
                 />
 
                 <ConfirmationModal

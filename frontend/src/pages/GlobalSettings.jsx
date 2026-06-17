@@ -1,53 +1,90 @@
 import React, { useState, useEffect } from 'react';
 import {
-    Save, Building2, GitBranch, Shield, Bell,
-    Mail, Workflow, Database, AlertTriangle, FileText,
-    Settings, Key, Download, Trash2, CheckCircle
+    Save, Building2, Shield, Bell, Mail, Settings, CheckCircle
 } from 'lucide-react';
 import API_URL from '../apiConfig';
 
 const GlobalSettings = () => {
-    const [activeTab, setActiveTab] = useState('organization');
+    const [activeTab, setActiveTab] = useState('scoring');
     const [saving, setSaving] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+    const [hasChanges, setHasChanges] = useState(false);
 
-    // Mock Store state - in real app, these would come from context/API
+    // Initial state with scoring and pipeline defaults
     const [formData, setFormData] = useState({
         orgName: 'Acme Corp',
         timezone: 'UTC-5 (EST)',
-        apiKey: 'sk_live_xxxxxxxx',
-        pipeline: {
-            screeningScore: 75,
-            autoReject: true,
-            stages: ['Resume Screening', 'Aptitude Round', 'Coding Round', 'Technical Interview', 'Offer']
+        scoring: {
+            skills: 40,
+            experience: 25,
+            projects: 20,
+            education: 10,
+            bonus: 5
+        },
+        emails: {
+            invitationSubject: 'Invitation to Assessment Round - HiringAI',
+            invitationBody: 'Dear Candidate,\n\nYou have been promoted to the next stage of our recruitment process. Please log in to the portal to take your assessment.',
+            reminderSubject: 'Reminder: Pending Assessment - HiringAI',
+            reminderBody: 'Dear Candidate,\n\nThis is a friendly reminder to complete your pending assessment as soon as possible.'
+        },
+        security: {
+            faceProctoring: true,
+            fullscreenProctoring: true,
+            autoFlagSuspicious: true
         },
         notifications: {
             emailAlerts: true,
             slackIntegration: false,
-            weeklyDigest: true
+            weeklyDigest: true,
+            recipientEmail: 'gopalmuri1919@gmail.com'
         }
     });
 
     useEffect(() => {
-        fetch(`${API_URL}/api/settings/`)
+        const token = localStorage.getItem('token');
+        fetch(`${API_URL}/api/settings/`, {
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        })
             .then(res => res.json())
             .then(data => {
-                // Ensure we merge with defaults to avoid undefined errors if backend is empty
                 if (data) {
-                    setFormData(prev => ({ ...prev, ...data }));
+                    setFormData(prev => ({
+                        ...prev,
+                        ...data,
+                        scoring: { ...prev.scoring, ...(data.scoring || {}) },
+                        emails: { ...prev.emails, ...(data.emails || {}) },
+                        security: { ...prev.security, ...(data.security || {}) },
+                        notifications: { ...prev.notifications, ...(data.notifications || {}) }
+                    }));
+                    setHasChanges(false);
                 }
             })
             .catch(err => console.error("Failed to load settings", err));
     }, []);
 
+    // Calculate dynamic weights sum
+    const currentScoring = formData.scoring || { skills: 40, experience: 25, projects: 20, education: 10, bonus: 5 };
+    const scoringSum = 
+        (currentScoring.skills || 0) + 
+        (currentScoring.experience || 0) + 
+        (currentScoring.projects || 0) + 
+        (currentScoring.education || 0) + 
+        (currentScoring.bonus || 0);
+
+    const isScoringValid = scoringSum === 100;
+
     const handleSave = async () => {
+        if (!isScoringValid) {
+            alert(`Total scoring weight must equal exactly 100%. Currently it is ${scoringSum}%. Please adjust the sliders before saving.`);
+            return;
+        }
+
         setSaving(true);
         try {
             const res = await fetch(`${API_URL}/api/settings/`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
-                    // Add auth header if needed, assuming open or same token logic
                     'Authorization': `Bearer ${localStorage.getItem('token')}`
                 },
                 body: JSON.stringify({ config: formData })
@@ -55,6 +92,7 @@ const GlobalSettings = () => {
 
             if (res.ok) {
                 setShowSuccess(true);
+                setHasChanges(false);
                 setTimeout(() => setShowSuccess(false), 3000);
             } else {
                 throw new Error("Failed to save");
@@ -67,17 +105,55 @@ const GlobalSettings = () => {
         }
     };
 
+    const updateScoringField = (field, val) => {
+        setFormData(prev => ({
+            ...prev,
+            scoring: {
+                ...prev.scoring,
+                [field]: val
+            }
+        }));
+        setHasChanges(true);
+    };
+
+    const updateEmailField = (field, val) => {
+        setFormData(prev => ({
+            ...prev,
+            emails: {
+                ...prev.emails,
+                [field]: val
+            }
+        }));
+        setHasChanges(true);
+    };
+
+    const updateSecurityField = (field, val) => {
+        setFormData(prev => ({
+            ...prev,
+            security: {
+                ...prev.security,
+                [field]: val
+            }
+        }));
+        setHasChanges(true);
+    };
+
+    const updateNotificationField = (field, val) => {
+        setFormData(prev => ({
+            ...prev,
+            notifications: {
+                ...prev.notifications,
+                [field]: val
+            }
+        }));
+        setHasChanges(true);
+    };
+
     const tabs = [
-        { id: 'organization', label: 'Organization', icon: Building2 },
-        { id: 'pipeline', label: 'Hiring Pipeline', icon: Workflow },
-        { id: 'assessments', label: 'Assessments', icon: FileText },
-        { id: 'roles', label: 'Job Roles', icon: Database },
-        { id: 'scoring', label: 'AI Scoring', icon: BrainCircuitIcon },
+        { id: 'scoring', label: 'AI Scoring Weights', icon: BrainCircuitIcon },
         { id: 'notifications', label: 'Notifications', icon: Bell },
         { id: 'email', label: 'Email Templates', icon: Mail },
-        { id: 'security', label: 'Security', icon: Shield },
-        { id: 'export', label: 'Export Data', icon: Download },
-        { id: 'danger', label: 'Danger Zone', icon: AlertTriangle, danger: true },
+        { id: 'security', label: 'Security & Proctoring', icon: Shield }
     ];
 
     return (
@@ -88,12 +164,16 @@ const GlobalSettings = () => {
                     <h1 className="text-3xl font-extrabold text-gray-900 flex items-center gap-3">
                         <Settings className="text-gray-600" /> Global Settings
                     </h1>
-                    <p className="text-gray-500 mt-2">Manage your organization, hiring pipeline, and AI configurations centrally.</p>
+                    <p className="text-gray-500 mt-2">Manage your hiring pipeline, email templates, and AI configurations centrally.</p>
                 </div>
                 <button
                     onClick={handleSave}
-                    disabled={saving}
-                    className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold shadow-lg shadow-green-100 transition-all flex items-center gap-2 disabled:opacity-70"
+                    disabled={saving || !isScoringValid || !hasChanges}
+                    className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 shadow-lg ${
+                        (saving || !isScoringValid || !hasChanges) 
+                            ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none' 
+                            : 'bg-green-600 hover:bg-green-700 text-white shadow-green-100'
+                    }`}
                 >
                     {saving ? (
                         <>Saving...</>
@@ -123,7 +203,7 @@ const GlobalSettings = () => {
                                         className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors w-full text-left
                                             ${isActive
                                                 ? 'bg-green-50 text-green-700'
-                                                : tab.danger ? 'text-red-600 hover:bg-red-50' : 'text-gray-600 hover:bg-gray-50'
+                                                : 'text-gray-600 hover:bg-gray-50'
                                             }`}
                                     >
                                         <Icon size={18} />
@@ -137,95 +217,175 @@ const GlobalSettings = () => {
 
                 {/* Main Content Area */}
                 <div className="flex-1 space-y-6">
-                    {/* ORGANIZATION SETTINGS */}
-                    {activeTab === 'organization' && (
-                        <Section title="Organization Profile" description="Basic details about your company workspace.">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <Input label="Company Name" value={formData.orgName} />
-                                <Input label="Workspace URL" value="acme.hiring.ai" disabled suffix=".hiring.ai" />
-                                <Select label="Default Timezone" options={['UTC-8 (PST)', 'UTC-5 (EST)', 'UTC+0 (GMT)', 'UTC+5:30 (IST)']} />
-                                <Input label="Support Email" value="admin@acme.com" />
-                            </div>
-                        </Section>
-                    )}
-
-                    {/* PIPELINE SETTINGS */}
-                    {activeTab === 'pipeline' && (
-                        <Section title="Hiring Pipeline" description="Configure the stages and flow of your recruitment process.">
-                            <div className="space-y-4">
-                                <div className="p-4 bg-gray-50 rounded-lg border border-dashed border-gray-300 flex flex-wrap gap-2">
-                                    {formData.pipeline.stages.map((stage, i) => (
-                                        <div key={i} className="px-3 py-1.5 bg-white border border-gray-200 rounded-md shadow-sm text-sm font-medium text-gray-700 flex items-center gap-2">
-                                            <span className="w-5 h-5 rounded-full bg-green-100 text-green-600 flex items-center justify-center text-xs font-bold">{i + 1}</span>
-                                            {stage}
-                                        </div>
-                                    ))}
-                                    <button className="px-3 py-1.5 border-2 border-dashed border-gray-300 rounded-md text-sm text-gray-400 hover:border-green-300 hover:text-green-600 transition-colors">
-                                        + Add Stage
-                                    </button>
-                                </div>
-                                <Toggle label="Auto-reject below threshold" description="Automatically reject candidates who score below 40% in Resume Screening." checked={formData.pipeline.autoReject} />
-                                <Toggle label="Require Approval for Offer" description="Offers must be approved by an Admin before sending." checked={true} />
-                            </div>
-                        </Section>
-                    )}
-
-                    {/* AI SCORING */}
+                    {/* AI SCORING WEIGHTS */}
                     {activeTab === 'scoring' && (
-                        <Section title="AI Scoring Weights" description="Adjust how the AI prioritizes different factors.">
+                        <Section title="AI Resume Evaluation Weights" description="Configure the scoring formula used by the Groq AI engine during screening.">
                             <div className="space-y-6">
-                                <Range label="Skills Match" value={40} />
-                                <Range label="Experience Relevance" value={30} />
-                                <Range label="Education Fit" value={20} />
-                                <Range label="Cultural Alignment" value={10} />
-                                <div className="p-4 bg-green-50 text-green-800 text-sm rounded-lg flex items-start gap-3">
-                                    <AlertTriangle className="flex-shrink-0 mt-0.5" size={16} />
-                                    Total weight must equal 100%. Adjust sliders carefully.
+                                {/* Total Sum Progress Indicator */}
+                                <div className={`p-4 rounded-xl border flex items-center gap-3 transition-colors ${
+                                    isScoringValid 
+                                        ? 'bg-green-50 border-green-200 text-green-800' 
+                                        : 'bg-amber-50 border-amber-200 text-amber-800'
+                                }}`}>
+                                    {isScoringValid ? <CheckCircle className="text-green-600 shrink-0" size={20} /> : <AlertTriangle className="text-amber-600 shrink-0" size={20} />}
+                                    <div className="flex-1">
+                                        <p className="font-bold text-sm">
+                                            Total Target Weight: <span className="underline">{scoringSum}%</span> / 100%
+                                        </p>
+                                        <p className="text-xs mt-0.5 opacity-90">
+                                            {isScoringValid 
+                                                ? 'Scoring formula is balanced and valid. Changes can be saved.' 
+                                                : `Formula must sum up to exactly 100% to save. Please adjust parameters by ${100 - scoringSum}%`}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-5">
+                                    <Range 
+                                        label="1. Skills Matching" 
+                                        value={currentScoring.skills} 
+                                        onChange={(val) => updateScoringField('skills', val)} 
+                                        description="Semantic and keyword alignment between resume technical profiles and Job Description demands."
+                                    />
+                                    <Range 
+                                        label="2. Experience Relevance" 
+                                        value={currentScoring.experience} 
+                                        onChange={(val) => updateScoringField('experience', val)} 
+                                        description="Years of experience match, seniority level comparison, and background progression checks."
+                                    />
+                                    <Range 
+                                        label="3. Project & Role Alignment" 
+                                        value={currentScoring.projects} 
+                                        onChange={(val) => updateScoringField('projects', val)} 
+                                        description="Level of technical complexity, scope of contributions, and product alignment detailed in projects."
+                                    />
+                                    <Range 
+                                        label="4. Education Match" 
+                                        value={currentScoring.education} 
+                                        onChange={(val) => updateScoringField('education', val)} 
+                                        description="Verification of degrees, certifications, specializations, and institutional background matches."
+                                    />
+                                    <Range 
+                                        label="5. Preferred & Bonus Skills" 
+                                        value={currentScoring.bonus} 
+                                        onChange={(val) => updateScoringField('bonus', val)} 
+                                        description="Additional nice-to-have parameters, certificates, or extracurricular matches specified in JD."
+                                    />
                                 </div>
                             </div>
                         </Section>
                     )}
 
-                    {/* DANGER ZONE */}
-                    {activeTab === 'danger' && (
-                        <div className="bg-red-50 border border-red-200 rounded-xl overflow-hidden">
-                            <div className="p-6 border-b border-red-100">
-                                <h3 className="text-lg font-bold text-red-700 flex items-center gap-2">
-                                    <AlertTriangle size={20} /> Danger Zone
-                                </h3>
-                                <p className="text-red-600/80 text-sm mt-1">Irreversible actions. Proceed with caution.</p>
-                            </div>
-                            <div className="p-6 space-y-6">
-                                <div className="flex items-center justify-between">
+                    {/* NOTIFICATIONS SETTINGS */}
+                    {activeTab === 'notifications' && (
+                        <Section title="Notification Preferences" description="Configure when and how you want to be notified.">
+                            <div className="space-y-4">
+                                <Toggle 
+                                    label="Email Alerts" 
+                                    description="Receive immediate email alerts when a candidate submits a test or finishes an interview." 
+                                    checked={formData.notifications.emailAlerts} 
+                                    onChange={(val) => updateNotificationField('emailAlerts', val)}
+                                />
+                                <div className="p-4 bg-gray-50 rounded-xl border border-gray-200 space-y-2">
                                     <div>
-                                        <h4 className="font-bold text-gray-900">Reset Pipeline Data</h4>
-                                        <p className="text-sm text-gray-500">Archives all current candidates and resets stats.</p>
+                                        <label className="block text-sm font-semibold text-gray-700">HR Notification Recipient Email</label>
+                                        <p className="text-xs text-gray-500 mt-0.5 font-medium leading-relaxed">
+                                            Candidate alert, completion, and warning notifications will be dispatched here.
+                                        </p>
                                     </div>
-                                    <button className="px-4 py-2 bg-white border border-red-300 text-red-600 font-bold rounded-lg hover:bg-red-50">
-                                        Archive All
-                                    </button>
+                                    <input
+                                        type="email"
+                                        placeholder="hr@hiringai.com"
+                                        value={formData.notifications.recipientEmail || ''}
+                                        onChange={(e) => updateNotificationField('recipientEmail', e.target.value)}
+                                        className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-950 font-medium focus:ring-2 focus:ring-green-500 outline-none"
+                                    />
                                 </div>
-                                <div className="h-px bg-red-200/50"></div>
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <h4 className="font-bold text-gray-900">Delete Workspace</h4>
-                                        <p className="text-sm text-gray-500">Permanently delete this organization and all data.</p>
-                                    </div>
-                                    <button className="px-4 py-2 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700">
-                                        Delete Forever
-                                    </button>
-                                </div>
+                                <Toggle 
+                                    label="Slack Integration" 
+                                    description="Push real-time candidate progression notifications directly to your company Slack channel." 
+                                    checked={formData.notifications.slackIntegration} 
+                                    onChange={(val) => updateNotificationField('slackIntegration', val)}
+                                />
+                                <Toggle 
+                                    label="Weekly Digest" 
+                                    description="Receive a summarized weekly email containing stats, hires, and pending evaluations." 
+                                    checked={formData.notifications.weeklyDigest} 
+                                    onChange={(val) => updateNotificationField('weeklyDigest', val)}
+                                />
                             </div>
-                        </div>
+                        </Section>
                     )}
 
-                    {/* Placeholder for other tabs */}
-                    {!['organization', 'pipeline', 'scoring', 'danger'].includes(activeTab) && (
-                        <div className="flex flex-col items-center justify-center py-20 bg-white border border-gray-200 rounded-xl border-dashed">
-                            <Settings className="w-12 h-12 text-gray-300 mb-4" />
-                            <h3 className="text-lg font-medium text-gray-900">Configure {tabs.find(t => t.id === activeTab)?.label}</h3>
-                            <p className="text-gray-500">Settings for this section coming soon.</p>
-                        </div>
+                    {/* EMAIL TEMPLATES */}
+                    {activeTab === 'email' && (
+                        <Section title="Assessment Email Templates" description="Modify invitation and reminder emails automatically dispatched to candidates.">
+                            <div className="space-y-6">
+                                <div className="space-y-3">
+                                    <h4 className="font-bold text-gray-800 text-sm">Test Invitation Email</h4>
+                                    <Input 
+                                        label="Subject Line" 
+                                        value={formData.emails.invitationSubject} 
+                                        onChange={(val) => updateEmailField('invitationSubject', val)}
+                                    />
+                                    <div className="space-y-1.5">
+                                        <label className="block text-sm font-semibold text-gray-700">Body Text</label>
+                                        <textarea
+                                            value={formData.emails.invitationBody}
+                                            onChange={(e) => updateEmailField('invitationBody', e.target.value)}
+                                            rows={4}
+                                            className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-green-500 outline-none text-gray-950 font-medium"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="h-px bg-gray-200"></div>
+
+                                <div className="space-y-3">
+                                    <h4 className="font-bold text-gray-800 text-sm">Test Reminder Email</h4>
+                                    <Input 
+                                        label="Subject Line" 
+                                        value={formData.emails.reminderSubject} 
+                                        onChange={(val) => updateEmailField('reminderSubject', val)}
+                                    />
+                                    <div className="space-y-1.5">
+                                        <label className="block text-sm font-semibold text-gray-700">Body Text</label>
+                                        <textarea
+                                            value={formData.emails.reminderBody}
+                                            onChange={(e) => updateEmailField('reminderBody', e.target.value)}
+                                            rows={4}
+                                            className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-green-500 outline-none text-gray-950 font-medium"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </Section>
+                    )}
+
+                    {/* SECURITY & PROCTORING */}
+                    {activeTab === 'security' && (
+                        <Section title="Integrity & Proctoring Controls" description="Configure online testing security standards.">
+                            <div className="space-y-4">
+                                <Toggle 
+                                    label="Webcam Face Proctoring" 
+                                    description="Use candidate webcam stream to detect presence, verify identities, and flag multiple faces during tests." 
+                                    checked={formData.security.faceProctoring} 
+                                    onChange={(val) => updateSecurityField('faceProctoring', val)}
+                                />
+                                <Toggle 
+                                    label="Fullscreen Proctoring Enforcement" 
+                                    description="Enforce strict fullscreen constraints. Flag when candidates shift focus or navigate away from the test viewport." 
+                                    checked={formData.security.fullscreenProctoring} 
+                                    onChange={(val) => updateSecurityField('fullscreenProctoring', val)}
+                                />
+                                <Toggle 
+                                    label="Auto-Flag Suspicious Events" 
+                                    description="Automatically flag candidate profiles as 'Suspicious' on dashboard if security rules are violated more than 3 times." 
+                                    checked={formData.security.autoFlagSuspicious} 
+                                    onChange={(val) => updateSecurityField('autoFlagSuspicious', val)}
+                                />
+                            </div>
+                        </Section>
                     )}
                 </div>
             </div>
@@ -247,15 +407,16 @@ const Section = ({ title, description, children }) => (
     </div>
 );
 
-const Input = ({ label, value, disabled, suffix }) => (
-    <div className="space-y-1.5">
+const Input = ({ label, value, disabled, suffix, onChange }) => (
+    <div className="space-y-1.5 w-full">
         <label className="block text-sm font-semibold text-gray-700">{label}</label>
         <div className="relative">
             <input
                 type="text"
-                defaultValue={value}
+                value={value}
                 disabled={disabled}
-                className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-green-500 outline-none disabled:text-gray-500"
+                onChange={(e) => onChange && onChange(e.target.value)}
+                className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-gray-950 font-medium focus:ring-2 focus:ring-green-500 outline-none disabled:text-gray-500"
             />
             {suffix && (
                 <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">
@@ -266,36 +427,61 @@ const Input = ({ label, value, disabled, suffix }) => (
     </div>
 );
 
-const Select = ({ label, options }) => (
-    <div className="space-y-1.5">
+const Select = ({ label, options, value, onChange }) => (
+    <div className="space-y-1.5 w-full">
         <label className="block text-sm font-semibold text-gray-700">{label}</label>
-        <select className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-900 focus:ring-2 focus:ring-green-500 outline-none">
-            {options.map(opt => <option key={opt}>{opt}</option>)}
+        <select 
+            value={value} 
+            onChange={(e) => onChange && onChange(e.target.value)}
+            className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-950 font-bold focus:ring-2 focus:ring-green-500 outline-none cursor-pointer"
+        >
+            {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
         </select>
     </div>
 );
 
-const Toggle = ({ label, description, checked }) => (
-    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-100">
-        <div>
+const Toggle = ({ label, description, checked, onChange }) => (
+    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-200">
+        <div className="pr-4">
             <h4 className="font-bold text-gray-900 text-sm">{label}</h4>
-            <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+            <p className="text-xs text-gray-500 mt-0.5 font-medium leading-relaxed">{description}</p>
         </div>
-        <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" defaultChecked={checked} className="sr-only peer" />
+        <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input 
+                type="checkbox" 
+                checked={checked} 
+                onChange={(e) => onChange && onChange(e.target.checked)} 
+                className="sr-only peer" 
+            />
             <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-100 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
         </label>
     </div>
 );
 
-const Range = ({ label, value }) => (
-    <div className="space-y-3">
-        <div className="flex justify-between">
-            <label className="font-semibold text-gray-700 text-sm">{label}</label>
-            <span className="font-bold text-green-600 text-sm">{value}%</span>
+const Range = ({ label, value, onChange, description, max = 100 }) => (
+    <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl space-y-2 w-full">
+        <div className="flex justify-between items-start gap-4">
+            <div>
+                <label className="font-bold text-gray-800 text-sm">{label}</label>
+                <p className="text-[11px] text-gray-500 font-medium mt-0.5 leading-relaxed">{description}</p>
+            </div>
+            <span className="font-extrabold text-green-700 bg-green-50 border border-green-200 px-3 py-1 rounded-lg text-sm shrink-0 min-w-[55px] text-center">
+                {value}{max === 100 ? '%' : 'm'}
+            </span>
         </div>
-        <input type="range" className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-600" defaultValue={value} />
+        <input 
+            type="range" 
+            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-600 hover:accent-green-700 transition-colors" 
+            value={value || 0} 
+            onChange={(e) => onChange(parseInt(e.target.value) || 0)}
+            min="0"
+            max={max}
+        />
     </div>
+);
+
+const AlertTriangle = ({ size, className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
 );
 
 // Icon for AI Brain

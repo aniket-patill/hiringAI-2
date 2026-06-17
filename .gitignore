@@ -1,4 +1,16 @@
 # ====================================
+# ML MODELS (auto-downloaded, do not commit)
+# Keep in: backend/models/
+# ====================================
+*.pt
+*.onnx
+*.pb
+*.weights
+*.tflite
+backend/models/*.pt
+backend/models/*.onnx
+
+# ====================================
 # SENSITIVE & SECURITY FILES
 # ====================================
 # Environment variables and API keys

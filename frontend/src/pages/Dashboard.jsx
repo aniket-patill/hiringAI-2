@@ -91,7 +91,7 @@ const Dashboard = () => {
     ];
 
     return (
-        <div className="space-y-8 max-w-[1600px] mx-auto pb-12 px-4 sm:px-6 lg:px-8">
+        <div className="space-y-8 w-full pb-12">
             {/* Header */}
             <div className="border-b border-gray-200 pb-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
@@ -157,6 +157,27 @@ const Dashboard = () => {
                     enableScoreFilter={true}
                     showAnalyticsAction={false}
                     showRecommendation={true}
+                    onPromote={handlePromote}
+                    onDelete={async (ids) => {
+                        if (!ids || ids.length === 0) return;
+                        if (!window.confirm(`Permanently delete ${ids.length} selected candidate(s)? This cannot be undone.`)) return;
+
+                        try {
+                            setLoading(true);
+                            await Promise.all(ids.map(id =>
+                                fetch(`${API_URL}/api/resume/candidates/${id}/`, {
+                                    method: 'DELETE',
+                                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                                })
+                            ));
+                            alert('Candidates deleted successfully');
+                            fetchData();
+                        } catch (err) {
+                            console.error("Deletion failed", err);
+                            alert("Failed to delete candidates");
+                            setLoading(false);
+                        }
+                    }}
                 />
             </div>
         </div>

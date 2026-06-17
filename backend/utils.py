@@ -13,7 +13,7 @@ load_dotenv()
 # Security Config
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "your-secret-key-here") # Reuse key or new one
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours for testing
+ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days — sufficient for full candidate test lifecycle
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -28,7 +28,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        # Use configured expiry (not hardcoded 15 min)
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt

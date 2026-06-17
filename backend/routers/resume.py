@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timedelta
 import schemas, models, database
 from services.rag_service import RAGService
-# from .auth import get_current_user # Optional if public or protected
+from routers.auth import get_current_user
 
 router = APIRouter(
     prefix="/api/resume",
@@ -16,78 +16,94 @@ router = APIRouter(
 import time
 import concurrent.futures
 
-def process_single_resume(file_path: str, filename: str, job_description: str, upload_dir: str):
-    """
-    Helper function to process a single resume:
-    1. Ingest (OCR/Embed)
-    2. Extract Info
-    3. AI Screen (Groq)
-    Returns a dict with results or error.
-    Does NOT touch the DB to avoid thread safety issues.
-    """
-    start_time = time.time()
-    result = {
-        "file": filename, 
-        "status": "failed", 
-        "error": None,
-        "score": 0,
-        "reasoning": "N/A",
-        "analysis": {},
-        "candidate_info": {},
-        "timings": {},
-        "rag_mode": "direct_text"
-    }
-    
-    try:
-        resume_id = f"temp_{filename}"
+import re
 
-        # 1. Extract resume text first so we can still continue even if the
-        # embedding stack is unavailable in the current Python environment.
+COMMON_SKILLS = [
+    "python", "javascript", "typescript", "java", "c++", "c#", "ruby", "php", "go", "golang", "rust", "swift", "kotlin",
+    "react", "angular", "vue", "nextjs", "node", "nodejs", "express", "django", "fastapi", "flask", "spring", "laravel",
+    "sql", "mysql", "postgresql", "mongodb", "redis", "cassandra", "elasticsearch", "oracle",
+    "aws", "azure", "gcp", "docker", "kubernetes", "jenkins", "git", "github", "gitlab", "terraform", "ansible",
+    "machine learning", "deep learning", "nlp", "ai", "artificial intelligence", "data science", "pandas", "numpy", "tensorflow", "pytorch",
+    "html", "css", "tailwind", "bootstrap", "graphql", "rest api", "microservices", "agile", "scrum", "devops"
+]
+
+def get_keyword_score(resume_text: str, jd_text: str):
+    resume_text_lower = resume_text.lower()
+    jd_text_lower = jd_text.lower()
+    
+    # Extract matching skills from JD
+    required_skills = [skill for skill in COMMON_SKILLS if skill in jd_text_lower]
+    if not required_skills:
+        # Fallback: extract clean words from JD
+        words = re.findall(r'\b\w{3,15}\b', jd_text_lower)
+        stopwords = {'and', 'the', 'for', 'with', 'you', 'are', 'our', 'will', 'that', 'this', 'work', 'join', 'team', 'role', 'about', 'from', 'have', 'need', 'must'}
+        required_skills = list(set(words) - stopwords)[:15]
+        
+    if not required_skills:
+        return 0.0, [], []
+        
+    matched_skills = [skill for skill in required_skills if skill in resume_text_lower]
+    missing_skills = [skill for skill in required_skills if skill not in resume_text_lower]
+    
+    score = (len(matched_skills) / len(required_skills)) * 100.0
+    return round(score, 1), matched_skills, missing_skills
+
+def extract_single_resume(file_path: str, filename: str):
+    try:
         full_text = RAGService.extract_text_from_pdf(file_path)
         candidate_info = RAGService.extract_candidate_info(full_text, filename)
-        result["candidate_info"] = candidate_info
-        result["full_text"] = full_text
-        
-        # 2. Best-effort vector ingestion. If sentence-transformers is broken,
-        # continue with direct full-text screening instead of failing the upload.
-        t0 = time.time()
-        try:
-            user_id = 1
-            RAGService.ingest_resume(user_id, resume_id, file_path)
-            result["rag_mode"] = "vector_plus_text"
-        except Exception as ingest_error:
-            result["rag_mode"] = "direct_text_fallback"
-            print(f"Vector ingest skipped for {filename}: {ingest_error}")
-        t1 = time.time()
-        result["timings"]["ingest"] = t1 - t0
-
-        # 3. Screen using the extracted full text directly.
-        t2 = time.time()
-        analysis = RAGService.screen_resume(job_description, resume_id, full_text)
-        t3 = time.time()
-        result["timings"]["ai"] = t3 - t2
-        
-        result["analysis"] = analysis
-        result["score"] = analysis.get('score', 0)
-        result["role"] = analysis.get('extracted_role') # Capture AI extracted role
-        result["reasoning"] = analysis.get('reasoning', "N/A")
-        result["status"] = "success"
-        
+        return {
+            "file": filename,
+            "file_path": file_path,
+            "status": "success",
+            "candidate_info": candidate_info,
+            "full_text": full_text
+        }
     except Exception as e:
-        print(f"Error in worker for {filename}: {e}")
-        result["error"] = str(e)
-        
-    result["total_time"] = time.time() - start_time
-    return result
+        print(f"Error extracting {filename}: {e}")
+        return {
+            "file": filename,
+            "file_path": file_path,
+            "status": "failed",
+            "error": str(e),
+            "candidate_info": {},
+            "full_text": ""
+        }
+
+def run_llm_screening(candidate_data: dict, job_description: str, jd_title: str):
+    candidate_name = candidate_data['candidate_info'].get('name', candidate_data['file'])
+    print(f"   [LLM Start] Running Groq screening for {candidate_name}...")
+    try:
+        analysis = RAGService.screen_resume(job_description, f"temp_{candidate_data['file']}", candidate_data["full_text"])
+        candidate_data["analysis"] = analysis
+        candidate_data["score"] = analysis.get("score", 0)
+        candidate_data["reasoning"] = analysis.get("reasoning", "N/A")
+        candidate_data["status"] = "success"
+        print(f"   [LLM Success] Completed Groq screening for {candidate_name} | AI Score: {candidate_data['score']}%")
+    except Exception as e:
+        print(f"   [LLM Error] Groq screening failed for {candidate_name} due to: {e}. Falling back to Stage 1 keyword score.")
+        candidate_data["score"] = candidate_data["keyword_score"]
+        candidate_data["reasoning"] = f"Groq API Error ({e}). Safely fell back to local keyword match score."
+        candidate_data["analysis"] = {
+            "score": candidate_data["keyword_score"],
+            "extracted_role": jd_title,
+            "reasoning": candidate_data["reasoning"],
+            "key_skills_match": candidate_data["matched_skills"],
+            "missing_skills": candidate_data["missing_skills"]
+        }
+        candidate_data["status"] = "success"
+    return candidate_data
 
 @router.post("/screen/")
 def screen_resume(
     files: List[UploadFile] = File(...),
     job_description: Optional[str] = Form(None),
-    db: Session = Depends(database.get_db)
+    top_n: Optional[int] = Form(10),
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     start_total = time.time()
-    print(f"--- START PARALLEL SCREENING: {len(files)} files ---")
+    print(f"--- START PARALLEL SCREENING: {len(files)} files (Top N: {top_n}) ---")
     
     # Normalization Helper
     def normalize_role(raw_title: str) -> str:
@@ -165,121 +181,184 @@ def screen_resume(
         
         saved_files.append((file_location, file.filename))
 
-    # 2. Parallel Processing (Heavy CPU/Network)
-    processed_data = []
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future_to_file = {
-            executor.submit(process_single_resume, loc, name, job_description, UPLOAD_DIR): name 
+    # 2. Stage 1: Parallel Text Extraction
+    print(f"[Stage 1] Extracting text and matching keywords for {len(saved_files)} resumes...")
+    extractions = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(extract_single_resume, loc, name): name 
             for loc, name in saved_files
         }
+        for future in concurrent.futures.as_completed(futures):
+            extractions.append(future.result())
+
+    # Calculate keyword scores and filter out failures
+    successful_extractions = []
+    for ext in extractions:
+        if ext["status"] == "failed":
+            results.append(ext)
+            continue
         
-        for future in concurrent.futures.as_completed(future_to_file):
-            data = future.result()
-            processed_data.append(data)
-            
-            # Print logs immediately as they finish
-            if data["status"] == "success":
-                print(f"Finished {data['file']} in {data['total_time']:.2f}s "
-                      f"(Ingest: {data['timings'].get('ingest',0):.2f}s, AI: {data['timings'].get('ai',0):.2f}s)")
-            else:
-                print(f"Failed {data['file']}: {data['error']}")
-    
-    # 3. Sequential DB Writes (Main Thread - Safe)
-    for data in processed_data:
-        if data["status"] == "failed":
-            results.append(data)
+        email = ext["candidate_info"].get("email")
+        if not email:
+            ext["error"] = "Could not extract email."
+            ext["status"] = "failed"
+            results.append(ext)
             continue
             
-        # Extract data for DB
+        keyword_score, matched_skills, missing_skills = get_keyword_score(ext["full_text"], job_description)
+        ext["keyword_score"] = keyword_score
+        ext["matched_skills"] = matched_skills
+        ext["missing_skills"] = missing_skills
+        
+        candidate_name = ext["candidate_info"].get("name", ext["file"])
+        print(f" -> Found candidate: {candidate_name} | Local Keyword Score: {keyword_score}%")
+        successful_extractions.append(ext)
+
+    # Sort by keyword score descending
+    successful_extractions.sort(key=lambda x: x["keyword_score"], reverse=True)
+
+    # Slice candidates
+    to_llm = successful_extractions[:top_n]
+    to_fallback = successful_extractions[top_n:]
+
+    # 3. Stage 2: Parallel LLM screening for top candidates
+    llm_screened = []
+    if to_llm:
+        print(f"[Stage 2] Submitting Top {len(to_llm)} candidates to Groq LLM for deep evaluation:")
+        for c in to_llm:
+            c_name = c["candidate_info"].get("name", c["file"])
+            print(f" -> Sending to LLM: {c_name} (Stage 1 Score: {c['keyword_score']}%)")
+            
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(run_llm_screening, cand, job_description, jd_title): cand["file"]
+                for cand in to_llm
+            }
+            for future in concurrent.futures.as_completed(futures):
+                llm_screened.append(future.result())
+
+    # Build direct fallback matches for remaining candidates (no LLM call)
+    fallback_screened = []
+    if to_fallback:
+        print(f"[Stage 2 Fallback] Bypassing LLM screening for remaining {len(to_fallback)} candidates to optimize speed:")
+        for cand in to_fallback:
+            cand_name = cand["candidate_info"].get("name", cand["file"])
+            print(f" -> Bypassed LLM: {cand_name} | Using Keyword Score: {cand['keyword_score']}%")
+            
+            cand["score"] = cand["keyword_score"]
+            cand["reasoning"] = f"Keyword Score: {cand['keyword_score']}%. Bypassed deep AI evaluation to optimize processing speed."
+            cand["analysis"] = {
+                "score": cand["keyword_score"],
+                "extracted_role": jd_title,
+                "reasoning": cand["reasoning"],
+                "key_skills_match": cand["matched_skills"],
+                "missing_skills": cand["missing_skills"]
+            }
+            cand["status"] = "success"
+            fallback_screened.append(cand)
+
+    all_processed = llm_screened + fallback_screened
+
+    # 4. Sort ALL scored results first, then only save top_n to DB
+    #    Candidates outside top_n are NOT saved — they don't appear anywhere in the pipeline
+    scored = [d for d in all_processed if d["status"] != "failed"]
+    failed = [d for d in all_processed if d["status"] == "failed"]
+
+    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    top_candidates = scored[:top_n]
+    rejected_candidates = scored[top_n:]  # Did not make the cut
+
+    # Remove rejected candidates from DB if they were previously added
+    for data in rejected_candidates:
+        info = data.get("candidate_info", {})
+        email = info.get("email")
+        if email:
+            existing = db.query(models.Candidate).filter(models.Candidate.email == email).first()
+            if existing:
+                db.delete(existing)
+        print(f" -> REJECTED (not in top {top_n}): {info.get('name', data.get('file', '?'))} | Score: {data.get('score', 0):.1f}%")
+    db.commit()
+
+    # DB Writes — only for top_n candidates
+    for data in top_candidates:
         info = data["candidate_info"]
         email = info.get('email')
         score = data["score"]
-        
-        if not email:
-            data["error"] = "Could not extract email."
-            data["status"] = "failed"
-            results.append(data)
-            continue
-            
+
         # DB Upsert
         candidate = db.query(models.Candidate).filter(models.Candidate.email == email).first()
-        
+
         # STRICT ROLE ENFORCEMENT: Always use the Normalized JD Title
         target_role = jd_title
-        
+
         if not candidate:
-            print(f"DEBUG: Creating NEW candidate for {email}")
             candidate = models.Candidate(
                 name=info.get('name', 'Unknown'),
                 email=email,
-                role=target_role, # STRICT: Use normalized JD Title
+                role=target_role,
                 status=models.CandidateStatus.Applied,
                 stage=models.CandidateStage.Resume_Screening,
                 resume_file=data["file"],
-                full_text=data["full_text"], # Save to SQL
+                full_text=data["full_text"],
                 score=score,
-                analysis_data=data["analysis"]
+                analysis_data=data["analysis"],
+                created_by=current_user.id
             )
             db.add(candidate)
-            db.commit() 
+            db.commit()
             db.refresh(candidate)
-            
-            # Log
-            log = models.ActivityLog(user_id=1, action="screened", target=candidate.name, details=f"Score: {score}/100")
+            log = models.ActivityLog(user_id=current_user.id, action="screened", target=candidate.name, details=f"Score: {score}/100")
             db.add(log)
         else:
-            print(f"DEBUG: Found EXISTING candidate: {candidate.name}")
-            # FIX: Aggressively update metadata if we found better info
-            # This fixes "Unknown Candidate" persistence
+            # Update metadata if we found better info
             new_name = info.get('name', 'Unknown')
             if new_name and new_name not in ["Unknown", "Unknown Candidate", "Candidate", "Resume", "CV"]:
-                print(f"DEBUG: Updating Name to: {new_name}")
                 candidate.name = new_name
-                info["name"] = new_name # Update response data too
-            else:
-                print(f"DEBUG: Skipping name update. New Name: '{new_name}'")
-            
-            # STRICT ROLE UPDATE: Enforce the current batch's role
-            # This ensures if we re-screen for a NEW role, they get updated.
+                info["name"] = new_name
             if candidate.role != target_role:
-                 print(f"DEBUG: Updating Role from '{candidate.role}' to '{target_role}'")
-                 candidate.role = target_role
-            
+                candidate.role = target_role
+
             candidate.score = score
-            candidate.analysis_data = data["analysis"] # Save full breakdown
-            candidate.full_text = data["full_text"] # Update text too
-            candidate.status = models.CandidateStatus.Applied # Reset to valid status
+            candidate.analysis_data = data["analysis"]
+            candidate.full_text = data["full_text"]
+            candidate.status = models.CandidateStatus.Applied
             candidate.stage = models.CandidateStage.Resume_Screening
-            log = models.ActivityLog(user_id=1, action="re-screened", target=candidate.name, details=f"Score: {score}/100")
+            candidate.created_by = current_user.id
+            log = models.ActivityLog(user_id=current_user.id, action="re-screened", target=candidate.name, details=f"Score: {score}/100")
             db.add(log)
         db.commit()
-        print("DEBUG: DB Commit Successful")
-        
-        # FINAL FIX: Inject the structure the Frontend expects!
-        # Frontend looks for: res.candidate.name
+
+        # Structure for Frontend
         data["candidate"] = {
             "name": candidate.name,
             "email": candidate.email,
             "id": candidate.id,
             "role": candidate.role
         }
-        
+
+        results.append(data)
+
+    # Add failed entries for visibility (no DB write)
+    for data in failed:
         results.append(data)
 
     total_time = time.time() - start_total
-    print(f"--- BATCH COMPLETE in {total_time:.2f}s ---")
+    print(f"--- BATCH COMPLETE in {total_time:.2f}s | Top {top_n} saved to DB ---")
 
     return {
         "message": "Screening Complete",
-        "results": results,
+        "results": results,  # Already only top_n + any failures
+        "total_screened": len(scored),
+        "top_n": top_n,
         "status": "completed"
     }
 
 @router.post("/candidates/", response_model=schemas.CandidateResponse)
 def create_candidate_manual(
     candidate_in: schemas.CandidateCreate,
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     # Check if candidate already exists
     existing = db.query(models.Candidate).filter(models.Candidate.email == candidate_in.email).first()
@@ -293,7 +372,8 @@ def create_candidate_manual(
         stage=candidate_in.stage,
         status=candidate_in.status,
         score=0.0,
-        analysis_data={"reasoning": "Manually added candidate."}
+        analysis_data={"reasoning": "Manually added candidate."},
+        created_by=current_user.id
     )
     
     db.add(new_candidate)
@@ -302,7 +382,7 @@ def create_candidate_manual(
     
     # Log activity
     log = models.ActivityLog(
-        user_id=1,
+        user_id=current_user.id,
         action="manually added",
         target=new_candidate.name,
         details=f"Role: {new_candidate.role}"
@@ -317,9 +397,10 @@ def get_candidates(
     stage: Optional[str] = None,
     status: Optional[str] = None,
     role: Optional[str] = None,
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.Candidate)
+    query = db.query(models.Candidate).filter(models.Candidate.created_by == current_user.id)
     if stage:
         query = query.filter(models.Candidate.stage == stage)
     if status:
@@ -330,15 +411,18 @@ def get_candidates(
     return query.order_by(models.Candidate.created_at.desc()).all()
 
 @router.get("/active-roles/", response_model=List[str])
-def get_active_roles(db: Session = Depends(database.get_db)):
+def get_active_roles(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     """
-    Fetch distinct, non-null job roles from candidates to populate frontend dropdowns.
+    Fetch distinct, non-null job roles from candidates belonging to the current user.
     """
     roles = db.query(models.Candidate.role).distinct().filter(
+        models.Candidate.created_by == current_user.id,
         models.Candidate.role != None,
         models.Candidate.role != ""
     ).all()
-    # Flatten tuple result [('Role A',), ('Role B',)] -> ['Role A', 'Role B']
     return sorted([r[0] for r in roles if r[0]])
 def update_candidate(
     candidate_id: int,
@@ -372,9 +456,13 @@ def update_candidate(
 @router.delete("/candidates/{candidate_id}/", status_code=status.HTTP_204_NO_CONTENT)
 def delete_candidate(
     candidate_id: int,
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
+    candidate = db.query(models.Candidate).filter(
+        models.Candidate.id == candidate_id,
+        models.Candidate.created_by == current_user.id
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
         
@@ -386,9 +474,13 @@ def delete_candidate(
 @router.post("/candidates/bulk-update/", response_model=Dict[str, Any])
 def bulk_update_candidates(
     payload: schemas.BulkCandidateUpdate,
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    candidates = db.query(models.Candidate).filter(models.Candidate.id.in_(payload.candidate_ids)).all()
+    candidates = db.query(models.Candidate).filter(
+        models.Candidate.id.in_(payload.candidate_ids),
+        models.Candidate.created_by == current_user.id
+    ).all()
     
     if not candidates:
         raise HTTPException(status_code=404, detail="No candidates found with provided IDs")
@@ -471,10 +563,10 @@ def bulk_update_candidates(
             candidate.status = payload.status
             has_changed = True
             
-        # Trigger Offer Email if the frontend explicitly requests "Offer Released" status
-        # This is outside the status check to allow re-sending if it failed previously
-        if payload.status == "Offer Released":
+        # Trigger Offer Email if the status is "Offer Released" or stage becomes "Offer Sent"
+        if payload.status == "Offer Released" or current_target == models.CandidateStage.Offer_Sent.value:
             candidate.stage = models.CandidateStage.Offer_Sent.value # Update stage so they leave the interview round
+            candidate.status = "Offer Released"
             has_changed = True
             try:
                 import utils
@@ -502,8 +594,12 @@ def bulk_update_candidates(
     }
 
 @router.get("/stats/", response_model=schemas.StatsResponse)
-def get_stats(days: Optional[str] = None, db: Session = Depends(database.get_db)):
-    query = db.query(models.Candidate)
+def get_stats(
+    days: Optional[str] = None,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    query = db.query(models.Candidate).filter(models.Candidate.created_by == current_user.id)
     
     if days and days != 'all':
         try:
@@ -541,3 +637,98 @@ def get_stats(days: Optional[str] = None, db: Session = Depends(database.get_db)
             "interview_cleared": interview_cleared
         }
     }
+
+@router.post("/rescreen-unscored/")
+def rescreen_unscored_candidates(
+    payload: dict,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Re-run AI screening for candidates whose score is 0 and analysis_data is empty.
+    Uses the saved resume file on disk + the provided job_description.
+    """
+    job_description = payload.get("job_description", "")
+    if not job_description or not job_description.strip():
+        raise HTTPException(status_code=400, detail="Job description is required.")
+
+    # Find candidates owned by this user with no score and no analysis
+    unscored = db.query(models.Candidate).filter(
+        models.Candidate.created_by == current_user.id,
+        models.Candidate.score == 0.0,
+        models.Candidate.analysis_data == None
+    ).all()
+
+    if not unscored:
+        return {"message": "All candidates already have scores.", "rescreened": 0}
+
+    # Extract JD title
+    jd_lines = [l.strip() for l in job_description.split('\n') if l.strip()]
+    raw_title = jd_lines[0][:100] if jd_lines else "General Candidate"
+    # Simple normalize
+    cleaned = raw_title.lower()
+    if any(k in cleaned for k in ["full stack", "fullstack", "mern", "mean"]):
+        jd_title = "Full Stack Software Engineer"
+    elif any(k in cleaned for k in ["frontend", "front end", "react"]):
+        jd_title = "Frontend Developer"
+    elif any(k in cleaned for k in ["backend", "back end", "node", "django"]):
+        jd_title = "Backend Developer"
+    elif any(k in cleaned for k in ["python", "machine learning", "ai"]):
+        jd_title = "Python Developer"
+    else:
+        jd_title = raw_title.title()
+
+    rescreened_count = 0
+    results = []
+
+    for candidate in unscored:
+        resume_path = candidate.resume_file
+        full_text = candidate.full_text or ""
+
+        # Compute keyword score from stored full_text
+        keyword_score, matched_skills, missing_skills = get_keyword_score(full_text, job_description)
+
+        # Try LLM screening
+        try:
+            analysis = RAGService.screen_resume(job_description, f"rescreen_{candidate.id}", full_text)
+            score = analysis.get("score", keyword_score)
+            reasoning = analysis.get("reasoning", "Re-screened via AI.")
+            analysis_data = {
+                "score": score,
+                "extracted_role": jd_title,
+                "reasoning": reasoning,
+                "key_skills_match": analysis.get("key_skills_match", matched_skills),
+                "missing_skills": analysis.get("missing_skills", missing_skills)
+            }
+        except Exception as e:
+            # Fallback to keyword score
+            score = keyword_score
+            reasoning = f"AI unavailable. Score based on keyword matching: {keyword_score}%"
+            analysis_data = {
+                "score": keyword_score,
+                "extracted_role": jd_title,
+                "reasoning": reasoning,
+                "key_skills_match": matched_skills,
+                "missing_skills": missing_skills
+            }
+
+        # Update candidate record
+        candidate.score = score
+        candidate.analysis_data = analysis_data
+        db.commit()
+        rescreened_count += 1
+        results.append({
+            "name": candidate.name,
+            "email": candidate.email,
+            "score": score,
+            "reasoning": reasoning
+        })
+        print(f"[Re-Screen] {candidate.name} | Score: {score}%")
+
+    db.commit()
+    return {
+        "message": f"Re-screened {rescreened_count} candidate(s) successfully.",
+        "rescreened": rescreened_count,
+        "results": results
+    }
+

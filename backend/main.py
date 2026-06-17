@@ -2,18 +2,20 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import models, database
-from routers import auth, assessments, resume, dashboard, settings, interview
-# Suppress TensorFlow Warnings
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+from routers import auth, assessments, resume, dashboard, settings, interview, proctor
 
 app = FastAPI(title="HiringAI Enterprise API")
+
+# Mount media directory for resume files
+os.makedirs("media/resumes", exist_ok=True)
+app.mount("/media", StaticFiles(directory="media"), name="media")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -44,6 +46,7 @@ app.include_router(resume.router)
 app.include_router(dashboard.router)
 app.include_router(settings.router)
 app.include_router(interview.router)
+app.include_router(proctor.router)
 
 @app.get("/")
 def read_root():

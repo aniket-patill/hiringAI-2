@@ -2,7 +2,7 @@ import requests
 import os
 import json
 
-VAPI_API_KEY = os.getenv("VAPI_API_KEY") 
+VAPI_PRIVATE_KEY = os.getenv("VAPI_PRIVATE_KEY") 
 # Base Vapi API URL
 VAPI_BASE_URL = "https://api.vapi.ai"
 
@@ -11,8 +11,8 @@ def create_ephemeral_assistant(candidate_name: str, role: str, resume_summary: s
     Creates a temporary/transient assistant configuration in Vapi
     customized for the candidate's specific profile.
     """
-    if not VAPI_API_KEY:
-        print("Error: VAPI_API_KEY is missing.")
+    if not VAPI_PRIVATE_KEY:
+        print("Error: VAPI_PRIVATE_KEY is missing.")
         return None
 
     # Advanced System Prompt - Professional Technical Interviewer
@@ -120,7 +120,7 @@ Begin the interview now.
 
     try:
         headers = {
-            "Authorization": f"Bearer {VAPI_API_KEY}",
+            "Authorization": f"Bearer {VAPI_PRIVATE_KEY}",
             "Content-Type": "application/json"
         }
         

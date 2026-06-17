@@ -139,21 +139,18 @@ const GlobalNavbar = () => {
                         Dashboard
                     </Link>
 
-                    {/* Candidate Panel Trigger (Opens Modal) */}
-                    <a
-                        href="/portal/login"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all text-black hover:bg-gray-50 focus:outline-none`}
+                    <Link
+                        to="/analytics"
+                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/analytics') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
                     >
-                        Candidate Panel
-                    </a>
+                        Analytics
+                    </Link>
 
                     <Link
-                        to="/admin"
-                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/admin') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
+                        to="/settings"
+                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/settings') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
                     >
-                        Admin Panel
+                        Settings
                     </Link>
                 </div>
 

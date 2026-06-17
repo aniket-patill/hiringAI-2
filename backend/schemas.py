@@ -88,6 +88,7 @@ class CandidateResponse(BaseModel):
     status: str
     stage: str
     score: float
+    resume_file: Optional[str] = None
     analysis_data: Optional[Dict[str, Any]] = None
     created_at: datetime
 

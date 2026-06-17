@@ -1,8 +1,34 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { X, Brain, AlertCircle, CheckCircle, Sparkles, TrendingUp } from 'lucide-react';
+import { X, Brain, AlertCircle, CheckCircle, Sparkles, TrendingUp, FileText } from 'lucide-react';
+import API_URL from '../apiConfig';
 
-const AnalyticsModal = ({ candidate, onClose }) => {
+const hasResumeFile = (resumeFile) => {
+    if (!resumeFile) return false;
+    const fileStr = String(resumeFile).trim().toLowerCase();
+    return fileStr !== "" && fileStr !== "null" && fileStr !== "undefined" && fileStr !== "n/a" && fileStr !== "none";
+};
+
+const AnalyticsModal = ({ candidate, onClose, onViewResume }) => {
+    const [weights, setWeights] = React.useState({
+        skills: 40,
+        experience: 25,
+        projects: 20,
+        education: 10,
+        bonus: 5
+    });
+
+    React.useEffect(() => {
+        fetch(`${API_URL}/api/settings/`)
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.scoring) {
+                    setWeights(data.scoring);
+                }
+            })
+            .catch(err => console.error("Failed to load settings in modal", err));
+    }, []);
+
     if (!candidate) return null;
 
     const analysis = candidate.analysis_data || candidate.analysis || {};
@@ -48,6 +74,25 @@ const AnalyticsModal = ({ candidate, onClose }) => {
                             <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wide">
                                 {analysis.extracted_role || candidate.role}
                             </span>
+                            {hasResumeFile(candidate.resume_file) && (
+                                <button
+                                    onClick={() => {
+                                        let resumeUrl = candidate.resume_file;
+                                        if (!resumeUrl.startsWith('http')) {
+                                            resumeUrl = `${API_URL}/media/resumes/${resumeUrl}`;
+                                        }
+                                        if (onViewResume) {
+                                            onViewResume(resumeUrl);
+                                        } else {
+                                            window.open(resumeUrl, '_blank');
+                                        }
+                                    }}
+                                    className="ml-3 px-3 py-1 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 hover:text-gray-900 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 shadow-sm"
+                                >
+                                    <FileText size={14} className="text-gray-500" />
+                                    <span>View Resume</span>
+                                </button>
+                            )}
                         </div>
                         <p className="text-sm text-gray-500 flex items-center gap-2">
                             <Brain size={14} className="text-purple-500" /> AI Analysis Report
@@ -73,11 +118,11 @@ const AnalyticsModal = ({ candidate, onClose }) => {
 
                             <div className="space-y-4">
                                 <h4 className="text-sm font-bold text-gray-900 border-b border-gray-200 pb-2 mb-3">Scoring Breakdown</h4>
-                                <ScoreBar label="Skills Match" value={scores.skills || 0} max={40} textColor="text-blue-600" bgColor="bg-blue-600" />
-                                <ScoreBar label="Experience" value={scores.experience || 0} max={25} textColor="text-indigo-600" bgColor="bg-indigo-600" />
-                                <ScoreBar label="Project Alignment" value={scores.projects || 0} max={20} textColor="text-purple-600" bgColor="bg-purple-600" />
-                                <ScoreBar label="Education" value={scores.education || 0} max={10} textColor="text-teal-600" bgColor="bg-teal-600" />
-                                <ScoreBar label="Bonus" value={scores.bonus || 0} max={5} textColor="text-green-500" bgColor="bg-green-500" />
+                                <ScoreBar label="Skills Match" value={scores.skills || 0} max={weights.skills} textColor="text-blue-600" bgColor="bg-blue-600" />
+                                <ScoreBar label="Experience" value={scores.experience || 0} max={weights.experience} textColor="text-indigo-600" bgColor="bg-indigo-600" />
+                                <ScoreBar label="Project Alignment" value={scores.projects || 0} max={weights.projects} textColor="text-purple-600" bgColor="bg-purple-600" />
+                                <ScoreBar label="Education" value={scores.education || 0} max={weights.education} textColor="text-teal-600" bgColor="bg-teal-600" />
+                                <ScoreBar label="Bonus" value={scores.bonus || 0} max={weights.bonus} textColor="text-green-500" bgColor="bg-green-500" />
                             </div>
                         </div>
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Mail, Lock, ArrowRight, ShieldCheck, UserCircle } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -10,10 +10,56 @@ const CandidateLogin = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [autoChecking, setAutoChecking] = useState(true); // Show spinner while checking token
 
-    // --- Magic Link Logic REMOVED for Security ---
-    // User must manually enter credentials.
-    // ---------------------------------------------
+    // ── Smart session check on mount ──
+    useEffect(() => {
+        const token = localStorage.getItem('candidateToken');
+        if (!token) { setAutoChecking(false); return; }
+
+        // Always validate the stored token against the backend first
+        fetch(`${API_URL}/api/assessments/my-status/`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => {
+            if (!res.ok) throw new Error('Token invalid or expired');
+            return res.json();
+        })
+        .then(latest => {
+            if (latest.status === 'completed') {
+                // Already submitted — show message, clear token, no login needed
+                localStorage.removeItem('candidateToken');
+                localStorage.removeItem('currentAssessment');
+                localStorage.removeItem('aptitudeQuestions');
+                alert('Your assessment has already been submitted. Thank you!');
+                setAutoChecking(false);
+                return;
+            }
+
+            // Assessment is still pending — check if this is a mid-session refresh
+            const referrer = document.referrer || '';
+            const isInternalNavigation = referrer.includes('/portal/');
+
+            if (isInternalNavigation) {
+                // Mid-session refresh — auto-resume without re-login
+                localStorage.setItem('currentAssessment', JSON.stringify(latest));
+                navigate('/portal/start');
+            } else {
+                // Fresh visit (email link, new tab) — require fresh login
+                localStorage.removeItem('candidateToken');
+                localStorage.removeItem('currentAssessment');
+                localStorage.removeItem('aptitudeQuestions');
+                setAutoChecking(false);
+            }
+        })
+        .catch(() => {
+            // Token is invalid/expired — clear it and show login form
+            localStorage.removeItem('candidateToken');
+            localStorage.removeItem('currentAssessment');
+            localStorage.removeItem('aptitudeQuestions');
+            setAutoChecking(false);
+        });
+    }, []);
 
     const handleMagicLogin = async (token) => {
         setIsLoading(true);
@@ -39,8 +85,10 @@ const CandidateLogin = () => {
             localStorage.setItem('candidateToken', token);
             // We might not have the name, but that's okay, maybe extract from token or fetched data?
             // For now, let's just proceed.
-
             if (latest.status === 'completed') {
+                localStorage.removeItem('candidateToken');
+                localStorage.removeItem('currentAssessment');
+                localStorage.removeItem('aptitudeQuestions');
                 alert("Test Already Submitted. You cannot attempt this assessment again.");
                 setIsLoading(false);
                 return;
@@ -76,7 +124,8 @@ const CandidateLogin = () => {
             });
 
             if (!authResponse.ok) {
-                throw new Error("Invalid credentials");
+                const errorData = await authResponse.json().catch(() => ({}));
+                throw new Error(errorData.detail || "Invalid credentials");
             }
 
             const authData = await authResponse.json();
@@ -108,9 +157,10 @@ const CandidateLogin = () => {
                 setIsLoading(false);
                 return;
             }
-
-            // Check if already submitted
             if (latest.status === 'completed') {
+                localStorage.removeItem('candidateToken');
+                localStorage.removeItem('currentAssessment');
+                localStorage.removeItem('aptitudeQuestions');
                 alert("Test Already Submitted. You cannot attempt this assessment again.");
                 setIsLoading(false);
                 return;
@@ -128,6 +178,16 @@ const CandidateLogin = () => {
             setIsLoading(false);
         }
     };
+
+    // Show spinner while auto-checking stored token
+    if (autoChecking) {
+        return (
+            <div className="w-full max-w-lg mx-auto py-2 flex flex-col items-center justify-center gap-4" style={{ minHeight: '200px' }}>
+                <div className="w-10 h-10 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                <p className="text-gray-500 text-sm">Checking your session...</p>
+            </div>
+        );
+    }
 
     return (
         <div className="w-full max-w-lg mx-auto py-2">

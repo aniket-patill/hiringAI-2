@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import {
     LayoutDashboard, FileText, Code2, Users,
     Mic, ChevronLeft, ChevronRight, LogOut, Settings,
-    BrainCircuit, UserCheck, Layers
+    BrainCircuit, UserCheck, Layers, BarChart3
 } from 'lucide-react';
 import GlobalNavbar from '../components/GlobalNavbar';
 
@@ -156,8 +156,8 @@ const DashboardLayout = () => {
                 </motion.div>
 
                 {/* Main Content */}
-                <main className="flex-1 h-full overflow-y-auto bg-gray-50/50 p-4 md:p-8 relative scroll-smooth w-full">
-                    <div className="max-w-[1600px] mx-auto pb-20">
+                <main className="flex-1 h-full overflow-y-auto bg-gray-50/50 p-3 md:p-5 relative scroll-smooth w-full">
+                    <div className="w-full pb-20">
                         <Outlet />
                     </div>
                 </main>

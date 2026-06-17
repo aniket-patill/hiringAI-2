@@ -86,9 +86,18 @@ const TechnicalInterview = () => {
         // Check score for offer
         const selected = candidates.filter(c => candidateIds.includes(c.id));
         const lowScore = selected.filter(c => (c.score || 0) < 60);
+        const notDoneAnyRound = selected.filter(c => {
+            const hasAptitude = c.analysis_data?.correct !== undefined || c.analysis_data?.score_percentage !== undefined;
+            const hasCoding = c.analysis_data?.passed !== undefined;
+            const hasInterview = c.analysis_data?.interview !== undefined;
+            return !(hasAptitude || hasCoding || hasInterview);
+        });
 
         let message = `Release offer to ${candidateIds.length} candidate(s)? This will trigger an official email notification.`;
-        if (lowScore.length > 0) {
+        if (notDoneAnyRound.length > 0) {
+            const names = notDoneAnyRound.map(c => c.name).join(', ');
+            message = `WARNING: The following candidate(s) have NOT completed any test rounds (Aptitude, Coding, or Interview): ${names}.\n\n` + message;
+        } else if (lowScore.length > 0) {
             message = `WARNING: ${lowScore.length} candidate(s) have low interview scores (<60%).\n\n` + message;
         }
 
@@ -96,7 +105,7 @@ const TechnicalInterview = () => {
             isOpen: true,
             title: 'Releasing Job Offers',
             message: message,
-            type: lowScore.length > 0 ? 'warning' : 'info',
+            type: (notDoneAnyRound.length > 0 || lowScore.length > 0) ? 'warning' : 'info',
             confirmText: 'Release Offers',
             onConfirm: () => executeReleaseOffer(candidateIds)
         });
@@ -128,6 +137,27 @@ const TechnicalInterview = () => {
         }
     };
 
+    const handleDelete = async (candidateIds) => {
+        if (!candidateIds || candidateIds.length === 0) return;
+        if (!window.confirm(`Permanently delete ${candidateIds.length} selected candidate(s)? This cannot be undone.`)) return;
+
+        try {
+            setLoading(true);
+            await Promise.all(candidateIds.map(id =>
+                fetch(`${API_URL}/api/resume/candidates/${id}/`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                })
+            ));
+            alert('Candidates deleted successfully');
+            fetchCandidates();
+        } catch (err) {
+            console.error("Deletion failed", err);
+            alert("Failed to delete candidates");
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="space-y-6">
             <div className="flex justify-between items-center">
@@ -146,6 +176,7 @@ const TechnicalInterview = () => {
                 showRoleColumn={true}
                 onPromote={handlePromote}
                 onReleaseOffer={handleReleaseOffer}
+                onDelete={handleDelete}
             />
 
             <ConfirmationModal

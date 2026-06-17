@@ -1,37 +1,16 @@
 import re
 import os
-import chromadb
-from chromadb.utils import embedding_functions
-from sentence_transformers import SentenceTransformer
 import pypdf
 import requests
 import json
 from pathlib import Path
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-import requests
 from . import groq_client
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Initialize RAG Components
-# Persistent Client for Chroma
-chroma_path = BASE_DIR / "chroma_db"
-chroma_client = chromadb.PersistentClient(path=str(chroma_path))
-
-# Embedding Function (All-MiniLM-L6-v2)
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-class MiniLMEmbeddingFunction(embedding_functions.EmbeddingFunction):
-    def __call__(self, input):
-        return embedding_model.encode(input).tolist()
-
-collection = chroma_client.get_or_create_collection(
-    name="resume_chunks",
-    embedding_function=MiniLMEmbeddingFunction()
-)
 
 class RAGService:
 
@@ -50,60 +29,44 @@ class RAGService:
             "name": "Unknown Candidate",
             "email": None
         }
-        
-        print(f"DEBUG: --- Starting Extraction for {filename} ---")
-        print(f"DEBUG: Text Length: {len(text)}")
 
         # 1. Regex Email
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         email_match = re.search(email_pattern, text)
         if email_match:
             info["email"] = email_match.group(0)
-            print(f"DEBUG: Email found: {info['email']}")
 
         # 2. Heuristic Name
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         for i in range(min(5, len(lines))):
             potential_name = lines[i]
-            if (1 <= len(potential_name.split()) <= 4 and 
-                len(potential_name) < 50 and 
-                "@" not in potential_name and
-                not any(char.isdigit() for char in potential_name)):
-                
+            if (1 <= len(potential_name.split()) <= 4 and
+                    len(potential_name) < 50 and
+                    "@" not in potential_name and
+                    not any(char.isdigit() for char in potential_name)):
                 info["name"] = potential_name.title()
-                print(f"DEBUG: Heuristic Name found: {info['name']}")
                 break
 
         # 3. AI Fallback
         if not info["email"] or info["name"] == "Unknown Candidate":
-            print("DEBUG: Triggering AI Extraction...")
             try:
                 header_text = text[:3000]
                 ai_extracted = RAGService.extract_with_llm(header_text)
-                
                 if ai_extracted.get("name") and ai_extracted["name"] not in ["Unknown", "Null", None]:
                     info["name"] = ai_extracted["name"]
-                    print(f"DEBUG: AI Name found: {info['name']}")
                 if ai_extracted.get("email") and not info["email"]:
                     info["email"] = ai_extracted["email"]
-                    print(f"DEBUG: AI Email found: {info['email']}")
             except Exception as e:
-                print(f"DEBUG: AI Failed: {e}")
+                print(f"Candidate info extraction failed: {e}")
 
         # 4. Filename Fallback
-        print(f"DEBUG: Name before fallback: {info['name']}")
         if info["name"] in ["Unknown Candidate", "Resume", "Cv", "Curriculum Vitae"] and filename:
-            print(f"DEBUG: Attempting Filename Fallback with '{filename}'")
             base = os.path.splitext(filename)[0]
             clean_name = base.replace("_", " ").replace("-", " ").title()
             clean_name = re.sub(r'\bresume\b|\bcv\b|\bprofile\b', '', clean_name, flags=re.IGNORECASE).strip()
             if clean_name:
                 info["name"] = clean_name
-                print(f"DEBUG: Filename Fallback used. Name: {info['name']}")
-            else:
-                print("DEBUG: Filename cleaned to empty string.")
 
-        print(f"DEBUG: Final Extracted Info: {info}")
         return info
 
     @staticmethod
@@ -117,7 +80,7 @@ class RAGService:
         try:
             return RAGService._inner_extract_with_llm(text_chunk)
         except Exception as e:
-            print(f"DEBUG: Groq Extraction Exception after retries: {e}")
+            print(f"Groq extraction failed after retries: {e}")
             return {}
 
     @staticmethod
@@ -154,49 +117,14 @@ class RAGService:
         }
         
         # DEBUG
-        print(f"DEBUG: Calling Groq for extraction on {len(text_chunk)} chars...")
-        
         response = groq_client.execute_groq_request(url, payload, timeout=15)
-        response.raise_for_status() # Trigger tenacity retry
+        response.raise_for_status()
         
         if response.status_code == 200:
             content = response.json()['choices'][0]['message']['content']
-            print(f"DEBUG: Groq Response: {content}")
             return json.loads(content)
         
         return {}
-
-    @staticmethod
-    def chunk_text(text, chunk_size=500, overlap=50):
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunks.append(text[start:end])
-            start = end - overlap
-        return chunks
-
-    @staticmethod
-    def ingest_resume(user_id, resume_id, file_path):
-        """
-        1. Extract Text
-        2. Chunk & Embed -> Store in ChromaDB
-        """
-        full_text = RAGService.extract_text_from_pdf(file_path)
-        
-        # Chunking
-        chunks = RAGService.chunk_text(full_text)
-        ids = [f"{resume_id}_{i}" for i in range(len(chunks))]
-        metadatas = [{"resume_id": str(resume_id), "chunk_index": i} for i in range(len(chunks))]
-
-        # Add to Chroma
-        collection.add(
-            documents=chunks,
-            ids=ids,
-            metadatas=metadatas
-        )
-        
-        return resume_id
 
     @staticmethod
     def screen_resume(jd_text, resume_id, resume_context=""):
@@ -213,19 +141,6 @@ class RAGService:
                 "missing_skills": []
             }
 
-        # 1. Fallback to Chroma if context is empty
-        if not resume_context:
-            print("Fallback to Chroma Chunks...")
-            results = collection.query(
-                query_texts=[jd_text],
-                n_results=10, # Increase chunks to get more context
-                where={"resume_id": str(resume_id)}
-            )
-            if not results['documents'] or not results['documents'][0]:
-                return {"score": 0, "reasoning": "No context found", "key_skills_match": [], "missing_skills": []}
-            matched_chunks = results['documents'][0]
-            resume_context = "\n".join(matched_chunks)
-        
         # 3. Call Groq API with context
         if not groq_client.has_groq_key():
             return {"score": 0, "reasoning": "Missing API Key", "key_skills_match": [], "missing_skills": []}
@@ -238,6 +153,37 @@ class RAGService:
         retry=retry_if_exception_type(requests.exceptions.HTTPError)
     )
     def call_groq_api(jd, resume_context):
+        # Fetch dynamic scoring weights from database
+        try:
+            from database import SessionLocal
+            import models
+            db = SessionLocal()
+            # Get the most recent settings (works for single or multi-admin)
+            settings_obj = db.query(models.GlobalSettings).order_by(models.GlobalSettings.id.desc()).first()
+            weights = settings_obj.config.get("scoring", {
+                "skills": 40,
+                "experience": 25,
+                "projects": 20,
+                "education": 10,
+                "bonus": 5
+            }) if settings_obj else {
+                "skills": 40,
+                "experience": 25,
+                "projects": 20,
+                "education": 10,
+                "bonus": 5
+            }
+            db.close()
+        except Exception as e:
+            print(f"Error fetching scoring weights: {e}")
+            weights = {
+                "skills": 40,
+                "experience": 25,
+                "projects": 20,
+                "education": 10,
+                "bonus": 5
+            }
+
         prompt = f"""
         Act as a Senior Technical Recruiter evaluation engine.
         
@@ -251,12 +197,12 @@ class RAGService:
         Evaluate the candidate against the Job Description using the EXACT scoring rubric below.
         
         SCORING LOGIC (Total 100%):
-        1. Skills Matching (40%): Extract required skills from JD and compare with resume (semantic + keyword). Score = (matched/total) * 40.
-        2. Experience Relevance (25%): Compare years of experience and role relevance. Full match = 25. Partial = proportional. No match = 0.
-        3. Project / Role Alignment (20%): Analyze project complexity and impact vs JD responsibilities.
-        4. Education Match (10%): Full match (meets req) = 10. Related degree = 6-8. Unrelated/Missing = 0-4.
-        5. Preferred / Bonus Skills (5%): Award bonus for nice-to-have skills.
-
+        1. Skills Matching ({weights.get('skills', 40)}%): Extract required skills from JD and compare with resume (semantic + keyword). Score = (matched/total) * {weights.get('skills', 40)}.
+        2. Experience Relevance ({weights.get('experience', 25)}%): Compare years of experience and role relevance. Full match = {weights.get('experience', 25)}. Partial = proportional. No match = 0.
+        3. Project / Role Alignment ({weights.get('projects', 20)}%): Analyze project complexity and impact vs JD responsibilities. Max score = {weights.get('projects', 20)}.
+        4. Education Match ({weights.get('education', 10)}%): Full match (meets req) = {weights.get('education', 10)}. Related degree = proportional. Unrelated/Missing = lower score.
+        5. Preferred / Bonus Skills ({weights.get('bonus', 5)}%): Award bonus for nice-to-have skills. Max score = {weights.get('bonus', 5)}.
+        
         OUTPUT REQUIREMENTS:
         - Return a precise integer Total Score (0-100).
         - Provide component scores.
@@ -268,11 +214,11 @@ class RAGService:
         {{
             "score": (0-100 integer),
             "component_scores": {{
-                "skills": (0-40),
-                "experience": (0-25),
-                "projects": (0-20),
-                "education": (0-10),
-                "bonus": (0-5)
+                "skills": (0-{weights.get('skills', 40)}),
+                "experience": (0-{weights.get('experience', 25)}),
+                "projects": (0-{weights.get('projects', 20)}),
+                "education": (0-{weights.get('education', 10)}),
+                "bonus": (0-{weights.get('bonus', 5)})
             }},
             "key_skills_match": ["Skill A", "Skill B"],
             "missing_skills": ["Skill X", "Skill Y"],
@@ -307,9 +253,5 @@ class RAGService:
             
         except Exception as e:
             print(f"Groq API Error: {e}")
-            return {
-                "score": 0, 
-                "reasoning": f"AI Analysis Failed: {str(e)}",
-                "key_skills_match": [],
-                "missing_skills": []
-            }
+            # Re-raise so the caller can fall back to keyword matching
+            raise

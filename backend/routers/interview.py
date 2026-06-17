@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-import database, models, schemas
+import database, models, schemas, utils
 from routers.auth import get_current_user
 from services import vapi_service
 
@@ -126,31 +126,21 @@ def submit_interview(
     }
     
     # 3.5. AI Evaluation - Generate scores from transcript
-    print(f"DEBUG: Processing submission for candidate {candidate.id}. Transcript length: {len(transcript)}")
+    # 3.5. AI Evaluation — generate scores from transcript
     try:
         from services.interview_evaluation import evaluate_interview_transcript
-        
-        print("DEBUG: Starting AI evaluation...")
         scores = evaluate_interview_transcript(
             transcript=transcript,
             candidate_name=candidate.name,
             role=candidate.role or "Unknown",
             resume_summary=str(candidate.analysis_data) if candidate.analysis_data else ""
         )
-        print(f"DEBUG: AI evaluation result: {scores}")
-        
-        # Add scores to interview data
         current_data["interview"]["scores"] = scores
-        
-        # Update candidate's main score with overall interview score
         candidate.score = scores.get("overall_score", 0)
-        
     except Exception as e:
-        print(f"DEBUG: Interview evaluation FAILED: {e}")
+        print(f"Interview evaluation failed: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Continue without scores if evaluation fails
         current_data["interview"]["scores"] = {
             "technical_accuracy": 0,
             "communication_clarity": 0,
@@ -159,19 +149,15 @@ def submit_interview(
             "overall_score": 0,
             "feedback": "Evaluation unavailable"
         }
-    
+
     candidate.analysis_data = current_data
-    
-    # Flag modified to ensure SQLAlchemy updates the JSON field
+
     from sqlalchemy.orm.attributes import flag_modified
     flag_modified(candidate, "analysis_data")
-    
+
     # 4. Update candidate status to "Submitted" for interview stage
     if candidate.stage == "Technical Interview":
         candidate.status = "Submitted"
-        print(f"DEBUG: Updated candidate {candidate.id} status to Submitted")
-    else:
-        print(f"DEBUG: Candidate stage is {candidate.stage}, NOT updating to Submitted")
     
     # 5. SYNC with Assessment table (CRITICAL for re-login prevention)
     try:
@@ -186,6 +172,49 @@ def submit_interview(
             assessment.analysis_data = current_data["interview"]
     except Exception as e:
         print(f"Failed to sync interview assessment: {e}")
+
+    # Send HR Notification if alerts enabled
+    try:
+        settings_record = None
+        if candidate.created_by:
+            settings_record = db.query(models.GlobalSettings).filter(
+                models.GlobalSettings.created_by == candidate.created_by
+            ).first()
+        if not settings_record:
+            settings_record = db.query(models.GlobalSettings).filter(
+                models.GlobalSettings.key == "default"
+            ).first()
+
+        if settings_record and settings_record.config:
+            notifications_conf = settings_record.config.get("notifications", {})
+            if notifications_conf.get("emailAlerts", True):
+                creator_user = None
+                if candidate.created_by:
+                    creator_user = db.query(models.User).filter(models.User.id == candidate.created_by).first()
+                
+                # Check if the creator email is a dummy/generic one, otherwise use it
+                hr_email = creator_user.email if (creator_user and not creator_user.email.endswith('.internal')) else notifications_conf.get("recipientEmail")
+                
+                # If recipient email is a dummy (e.g. hr@company.com), fallback to the synced admin email (gopalmuri1919@gmail.com)
+                if hr_email == "hr@company.com" or not hr_email:
+                    hr_email = "gopalmuri1919@gmail.com"
+
+                if hr_email:
+                    hr_subject = f"Candidate AI Interview Completed: {candidate.name}"
+                    hr_body = f"""
+                    <h3>Candidate AI Interview Completion Alert</h3>
+                    <p><strong>Candidate Name:</strong> {candidate.name}</p>
+                    <p><strong>Email:</strong> {candidate.email}</p>
+                    <p><strong>Role:</strong> {candidate.role or 'Software Engineer'}</p>
+                    <p><strong>Assessment Type:</strong> Technical Voice Interview (AI)</p>
+                    <p><strong>Overall Score:</strong> {candidate.score}/100</p>
+                    <br/>
+                    <p>You can listen to the recording and read the transcript in the Admin Dashboard.</p>
+                    """
+                    utils.send_email(hr_email, hr_subject, hr_body)
+                    print(f"HR notification email sent to {hr_email}")
+    except Exception as e:
+        print(f"Failed to send HR notification email: {e}")
 
     db.commit()
     db.refresh(candidate)

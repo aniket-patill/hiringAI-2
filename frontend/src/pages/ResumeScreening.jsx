@@ -3,7 +3,7 @@ import { useDropzone } from 'react-dropzone';
 import {
     Upload, FileText, Brain, Loader2, CheckCircle, AlertCircle,
     Filter, ChevronRight, X, Sparkles, ChevronDown, ChevronUp,
-    Search, Play, Minus
+    Search, Play, Minus, ArrowRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import API_URL from '../apiConfig';
@@ -182,6 +182,32 @@ const ResumeScreening = () => {
 
     const [processedCount, setProcessedCount] = useState(0);
     const [results, setResults] = useState([]);
+    const [isPromoting, setIsPromoting] = useState(false);
+    const [promoteSuccess, setPromoteSuccess] = useState(false);
+
+    // Validation
+    const handlePromoteToNextStage = async () => {
+        if (!results.length) return;
+        setIsPromoting(true);
+        try {
+            const token = localStorage.getItem('token');
+            const candidateIds = results
+                .filter(r => r.status === 'Screened' && r.candidate?.id)
+                .map(r => r.candidate.id);
+            if (!candidateIds.length) { setIsPromoting(false); return; }
+            const response = await fetch(`${API_URL}/api/resume/candidates/bulk-update/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+                body: JSON.stringify({ candidate_ids: candidateIds, stage: 'NEXT' })
+            });
+            if (response.ok) {
+                setPromoteSuccess(true);
+            }
+        } catch (err) {
+            console.error('Promote failed:', err);
+        }
+        setIsPromoting(false);
+    };
 
     // Validation
     const isCountInvalid = files.length > 0 && shortlistCount > files.length;
@@ -205,65 +231,51 @@ const ResumeScreening = () => {
         setProcessedCount(0);
         setCurrentFileIndex(0);
 
-        let allProcessedCandidates = [];
-
+        setProcessingStage('parsing');
+        
+        const formData = new FormData();
+        formData.append('job_description', jobDescription);
+        formData.append('top_n', shortlistCount);
         for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            setCurrentFileIndex(i);
+            formData.append('files', files[i]);
+        }
 
-            setProcessingStage('parsing');
-            await new Promise(r => setTimeout(r, 600));
-
+        try {
+            const token = localStorage.getItem('token');
             setProcessingStage('extracting');
-            await new Promise(r => setTimeout(r, 600));
+            const response = await fetch(`${API_URL}/api/resume/screen/`, {
+                method: 'POST',
+                headers: {
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                },
+                body: formData
+            });
 
-            setProcessingStage('matching');
+            if (response.ok) {
+                setProcessingStage('scoring');
+                const data = await response.json();
 
-            const formData = new FormData();
-            formData.append('job_description', jobDescription);
-            formData.append('files', file);
+                if (data.results && data.results.length > 0) {
+                    const mappedResults = data.results.map((res, i) => ({
+                        id: `res-${Date.now()}-${i}`,
+                        name: res.candidate?.name || res.file || `Candidate ${i + 1}`,
+                        score: res.score || 0,
+                        status: res.error ? 'Failed' : 'Screened',
+                        analysis: res.analysis || {},
+                        reasoning: res.reasoning || "Analysis complete.",
+                        error: res.error
+                    }));
 
-            try {
-                const token = localStorage.getItem('token');
-                const response = await fetch(`${API_URL}/api/resume/screen/`, {
-                    method: 'POST',
-                    headers: {
-                        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-                    },
-                    body: formData
-                });
-
-                if (response.ok) {
-                    setProcessingStage('scoring');
-                    await new Promise(r => setTimeout(r, 400));
-
-                    const data = await response.json();
-
-                    if (data.results && data.results.length > 0) {
-                        const res = data.results[0];
-                        const mappedResult = {
-                            id: `res-${Date.now()}-${i}`,
-                            name: res.candidate?.name || file.name,
-                            score: res.score || 0,
-                            status: res.error ? 'Failed' : 'Screened',
-                            analysis: res.analysis || {},
-                            reasoning: res.reasoning || "Analysis complete.",
-                            error: res.error
-                        };
-
-                        allProcessedCandidates.push(mappedResult);
-                        allProcessedCandidates.sort((a, b) => b.score - a.score);
-                        const topK = allProcessedCandidates.slice(0, shortlistCount);
-
-                        setResults([...topK]);
-                        setProcessedCount(prev => prev + 1);
-                    }
-                } else {
-                    console.error("Failed to screen", file.name);
+                    mappedResults.sort((a, b) => b.score - a.score);
+                    setResults(mappedResults);
+                    setPromoteSuccess(false);
+                    setProcessedCount(files.length);
                 }
-            } catch (err) {
-                console.error("Network error for", file.name, err);
+            } else {
+                console.error("Failed to screen batch of resumes");
             }
+        } catch (err) {
+            console.error("Network error during batch screening", err);
         }
 
         setIsScreening(false);
@@ -350,7 +362,7 @@ const ResumeScreening = () => {
                 <div className="lg:col-span-8 flex flex-col h-full overflow-hidden">
 
                     {/* Header with Actions (Sticky) */}
-                    <div className={`bg-white border rounded-xl p-4 mb-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4 transition-all duration-500 ${files.length > 0 && !isScreening ? 'ring-2 ring-green-500 ring-offset-2 scale-[1.01]' : 'border-gray-200'}`}>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4 transition-all duration-500">
                         <div className="flex items-center gap-3">
                             <h2 className="text-lg font-semibold text-[#5d8c2c] flex items-center gap-2">
                                 Screening Results
@@ -363,7 +375,30 @@ const ResumeScreening = () => {
                         </div>
 
                         {/* Top-Right Action Group */}
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 flex-wrap justify-end">
+                            {/* Process to Next Stage button — shown after screening */}
+                            {results.length > 0 && !isScreening && (
+                                <button
+                                    onClick={handlePromoteToNextStage}
+                                    disabled={isPromoting || promoteSuccess}
+                                    className={`px-5 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 transition-all shadow-md whitespace-nowrap ${
+                                        promoteSuccess
+                                            ? 'bg-green-100 text-green-700 border border-green-300 cursor-default'
+                                            : isPromoting
+                                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                            : 'bg-white border border-green-600 text-green-700 hover:bg-green-50 hover:shadow-lg'
+                                    }`}
+                                >
+                                    {promoteSuccess ? (
+                                        <><CheckCircle size={16} /> Promoted to Next Stage</>
+                                    ) : isPromoting ? (
+                                        <><Loader2 size={16} className="animate-spin" /> Promoting...</>
+                                    ) : (
+                                        <><ArrowRight size={16} /> Process to Next Stage</>
+                                    )}
+                                </button>
+                            )}
+
                             {/* Shortlist Setting */}
                             <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200" title="Top candidates to return">
                                 <span className="text-xs font-bold text-gray-500">Top:</span>

@@ -1,9 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CheckCircle, Clock, AlertTriangle, Play, FileText } from 'lucide-react';
+import API_URL from '../../apiConfig';
 
 const InstructionsPage = () => {
     const navigate = useNavigate();
+
+    // Prevent completed candidates from accessing instructions page
+    useEffect(() => {
+        const token = localStorage.getItem('candidateToken');
+        if (!token) return;
+
+        fetch(`${API_URL}/api/assessments/my-status/`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => {
+            if (!res.ok) throw new Error();
+            return res.json();
+        })
+        .then(latest => {
+            if (latest && latest.status === 'completed') {
+                localStorage.removeItem('candidateToken');
+                localStorage.removeItem('currentAssessment');
+                localStorage.removeItem('aptitudeQuestions');
+                navigate('/portal/login');
+            }
+        })
+        .catch(() => {});
+    }, [navigate]);
+
     const [accepted, setAccepted] = useState(false);
 
     const candidateName = localStorage.getItem('candidateName') || 'Candidate';
@@ -11,8 +36,6 @@ const InstructionsPage = () => {
     const assessment = assessmentData ? JSON.parse(assessmentData) : null;
 
     // Debug: Log assessment type
-    console.log('Assessment Type:', assessment?.type);
-    console.log('Full Assessment:', assessment);
 
     // Pre-generate questions when page loads (for aptitude assessments)
     useEffect(() => {
@@ -168,6 +191,15 @@ const InstructionsPage = () => {
                 });
             } catch (err) {
                 console.error("Failed to mark assessment as started", err);
+            }
+
+            // Enter fullscreen — must be called inside a user gesture (this click handler)
+            try {
+                if (document.documentElement.requestFullscreen) {
+                    await document.documentElement.requestFullscreen();
+                }
+            } catch (err) {
+                console.warn('[Fullscreen] requestFullscreen failed:', err.message);
             }
 
             if (assessment.type === 'aptitude') {

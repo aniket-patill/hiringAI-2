@@ -74,6 +74,7 @@ class JobDescription(Base):
     description = Column(Text)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     target_capacity = Column(Integer, default=50)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 class Candidate(Base):
     __tablename__ = "candidates"
@@ -89,6 +90,7 @@ class Candidate(Base):
     analysis_data = Column(JSON, nullable=True) # AI Breakdown
     hashed_password = Column(String(255), nullable=True) # Added for separate auth
     is_active = Column(Boolean, default=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True) # Owner HR user
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -105,8 +107,9 @@ class ActivityLog(Base):
 class GlobalSettings(Base):
     __tablename__ = "global_settings"
     id = Column(Integer, primary_key=True, index=True)
-    key = Column(String(50), unique=True, index=True, default="default") 
+    key = Column(String(50), index=True, default="default")
     config = Column(JSON, default={})
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True) # Owner HR user
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
 class Notification(Base):

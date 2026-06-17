@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Editor } from '@monaco-editor/react';
 import {
@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import useProctoring from '../../hooks/useProctoring';
+import useFaceProctoring from '../../hooks/useFaceProctoring';
+import useFullscreen from '../../hooks/useFullscreen';
 import API_URL from '../../apiConfig';
 
 // Language Configuration (Restricted to Python and Java)
@@ -43,82 +45,224 @@ const CandidateCodingAssessment = () => {
     const [configuredTestCount, setConfiguredTestCount] = useState(5); // Default intensity
     const [submitted, setSubmitted] = useState(false);
 
-    // Proctoring Integration
     const [showWarning, setShowWarning] = useState(false);
     const [warningMessage, setWarningMessage] = useState('');
+    const [showTerminalOverlay, setShowTerminalOverlay] = useState(false);
+    const [terminalMessage, setTerminalMessage] = useState('');
+    const [faceViolationCount, setFaceViolationCount] = useState(0);
+
+    const [boxes, setBoxes] = useState([]);
+    const boxTimerRef = useRef(null);
+    const [detectionStatus, setDetectionStatus] = useState('idle');
+
+    // Cleanup timer on unmount
+    useEffect(() => {
+        return () => {
+            if (boxTimerRef.current) clearTimeout(boxTimerRef.current);
+        };
+    }, []);
+
+    const [securityConfig, setSecurityConfig] = useState({
+        faceProctoring: true,
+        fullscreenProctoring: true
+    });
+
+    useEffect(() => {
+        const token = localStorage.getItem('candidateToken') || localStorage.getItem('token');
+        fetch(`${API_URL}/api/settings/`, {
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.security) {
+                    setSecurityConfig(data.security);
+                }
+            })
+            .catch(err => console.error("Failed to load security settings", err));
+    }, []);
+
+    // Combined handlers shared by tab-switch + face detection
+    const handleViolation = (reason) => {
+        setWarningMessage(`Malpractice Detected: ${reason}. This attempt has been logged.`);
+        setShowWarning(true);
+        setTimeout(() => setShowWarning(false), 5000);
+    };
+    const handleTerminalViolation = (reason) => {
+        handleSubmit(`Malpractice - ${reason}`);
+        setTerminalMessage(`Maximum violations reached (${reason}). Your assessment has been submitted automatically.`);
+        setShowTerminalOverlay(true);
+    };
 
     const { violations } = useProctoring({
         enabled: !submitted,
         maxViolations: 3,
-        onViolation: (reason, count) => {
-            setWarningMessage(`Malpractice Detected: ${reason}. This attempt has been logged.`);
-            setShowWarning(true);
-            setTimeout(() => setShowWarning(false), 5000);
-        },
-        onTerminalViolation: (reason) => {
-            handleSubmit(`Malpractice - ${reason}`);
-            setTerminalMessage(`Maximum violations reached (${reason}). Your assessment has been submitted automatically.`);
-            setShowTerminalOverlay(true);
+        onViolation: handleViolation,
+        onTerminalViolation: handleTerminalViolation
+    });
+
+    // Fullscreen enforcement
+    const { reEnter: reEnterFullscreen } = useFullscreen({
+        enabled: !submitted && securityConfig.fullscreenProctoring,
+        onExit: () => {
+            handleViolation('Fullscreen exited — please stay in fullscreen during the assessment');
+            setTimeout(reEnterFullscreen, 2000);
         }
     });
 
-    const [scoreResult, setScoreResult] = useState(null);
-    const [showTerminalOverlay, setShowTerminalOverlay] = useState(false);
-    const [terminalMessage, setTerminalMessage] = useState('');
+    // Silent background face detection
+    const cameraVideoRef = useRef(null);
+    const { cameraStream, streamRef, suspectLabel } = useFaceProctoring({
+        enabled: !submitted && securityConfig.faceProctoring,
+        onDetection: (status) => setDetectionStatus(status),
+        onDetections: (dets, faceBoxes) => {
+            const isSuspect = dets.some(d => d.class !== 'person');
+            const allBoxes = [];
 
-    // Load Config from LocalStorage
+            // Face boxes — green normally, red when suspect also detected
+            (faceBoxes || []).forEach(fb => {
+                allBoxes.push({
+                    label: 'face',
+                    left:   `${(1 - fb[2]) * 100}%`,
+                    top:    `${fb[1] * 100}%`,
+                    width:  `${(fb[2] - fb[0]) * 100}%`,
+                    height: `${(fb[3] - fb[1]) * 100}%`,
+                    color:  isSuspect ? '#ef4444' : '#22c55e',
+                });
+            });
+
+            // Suspicious object boxes — always red
+            dets.filter(d => d.class !== 'person' && d.bbox).forEach(d => {
+                allBoxes.push({
+                    label: d.class,
+                    left:   `${(1 - d.bbox[2]) * 100}%`,
+                    top:    `${d.bbox[1] * 100}%`,
+                    width:  `${(d.bbox[2] - d.bbox[0]) * 100}%`,
+                    height: `${(d.bbox[3] - d.bbox[1]) * 100}%`,
+                    color:  '#ef4444',
+                });
+            });
+
+            setBoxes(allBoxes);
+            if (boxTimerRef.current) clearTimeout(boxTimerRef.current);
+            boxTimerRef.current = setTimeout(() => setBoxes([]), 4000);
+        },
+        onViolation: (reason) => {
+            setFaceViolationCount(prev => {
+                const next = prev + 1;
+                handleViolation(reason);
+                if (violations + next >= 3) handleTerminalViolation(reason);
+                return next;
+            });
+        }
+    });
+
+    // Bind camera stream and keep playing through fullscreen transitions
     useEffect(() => {
-        try {
-            const stored = localStorage.getItem('currentAssessment');
-            if (stored) {
-                const data = JSON.parse(stored);
-                if (data.config) {
-                    // CRITICAL: Load AI-Generated Questions (Dynamic)
-                    if (data.config.generated_questions && data.config.generated_questions.length > 0) {
-                        const dynamicQuestions = data.config.generated_questions.map(q => {
-                            const STRICT_TEMPLATES = {
-                                python: `def solve(input_data):\n    # return the result\n    pass`,
-                                java: `class Solution {\n    public Object solve(Object input) {\n        // return the result\n        return null;\n    }\n}`
-                            };
+        const bindAndPlay = () => {
+            const el = cameraVideoRef.current;
+            const stream = streamRef.current;
+            if (!el || !stream) return;
+            if (el.srcObject !== stream) {
+                el.srcObject = stream;
+            }
+            // Always try to play — fullscreen transition pauses the video
+            if (el.paused) {
+                el.play().catch(() => {});
+            }
+        };
 
-                            // Use ALL generated test cases - count is set by admin's testIntensity
-                            const tcList = (q.testCases && q.testCases.length > 0)
-                                ? q.testCases
-                                : [{ id: 1, input: {}, expected: '' }];
+        // Poll every 500ms to recover from fullscreen-caused pauses
+        const bindInterval = setInterval(bindAndPlay, 500);
 
-                            return {
-                                id: q.id,
-                                title: q.title || 'Coding Challenge',
-                                description: q.description || 'Solve this problem.',
-                                difficulty: q.difficulty || 'Medium',
-                                examples: (q.examples && q.examples.length > 0) ? q.examples : [{ input: 'Example input', output: 'Example output', explanation: 'No examples provided' }],
-                                testCases: tcList,
-                                defaultTestCases: tcList,
-                                constraints: q.constraints || [],
-                                starterCode: {
-                                    python: q.starterCode?.python || STRICT_TEMPLATES.python,
-                                    java: q.starterCode?.java || STRICT_TEMPLATES.java
-                                }
-                            };
-                        });
-                        setQuestions(dynamicQuestions);
-                    } else if (data.config.questionCount) {
-                        setQuestions(CODING_QUESTIONS.slice(0, data.config.questionCount));
-                    }
+        // Also immediately rebind when fullscreen changes
+        document.addEventListener('fullscreenchange', bindAndPlay);
 
-                    // Sync Time Limit
-                    if (data.config.timeLimit) {
-                        setTimeLeft(data.config.timeLimit * 60);
+        return () => {
+            clearInterval(bindInterval);
+            document.removeEventListener('fullscreenchange', bindAndPlay);
+        };
+    }, []);
+
+    const [scoreResult, setScoreResult] = useState(null);
+
+    // Load Config from LocalStorage + Guard against re-entry
+    useEffect(() => {
+        const init = async () => {
+            // Guard: Check backend status first to prevent re-entry after submission
+            const token = localStorage.getItem('candidateToken');
+            if (token) {
+                try {
+                    const res = await fetch(`${API_URL}/api/assessments/my-status/`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data && data.status === 'completed') {
+                            localStorage.removeItem('currentAssessment');
+                            localStorage.removeItem('candidateToken');
+                            navigate('/portal/login');
+                            return;
+                        }
                     }
-                    // Sync Test Intensity
-                    if (data.config.testIntensity) {
-                        setConfiguredTestCount(data.config.testIntensity);
-                    }
+                } catch (e) {
+                    console.warn('[Assessment] Status check failed, proceeding:', e);
                 }
             }
-        } catch (e) {
-            console.error("Failed to load assessment config", e);
-        }
+
+            try {
+                const stored = localStorage.getItem('currentAssessment');
+                if (stored) {
+                    const data = JSON.parse(stored);
+                    if (data.config) {
+                        // CRITICAL: Load AI-Generated Questions (Dynamic)
+                        if (data.config.generated_questions && data.config.generated_questions.length > 0) {
+                            const dynamicQuestions = data.config.generated_questions.map(q => {
+                                const STRICT_TEMPLATES = {
+                                    python: `def solve(input_data):\n    # return the result\n    pass`,
+                                    java: `class Solution {\n    public Object solve(Object input) {\n        // return the result\n        return null;\n    }\n}`
+                                };
+
+                                // Use ALL generated test cases - count is set by admin's testIntensity
+                                const tcList = (q.testCases && q.testCases.length > 0)
+                                    ? q.testCases
+                                    : [{ id: 1, input: {}, expected: '' }];
+
+                                return {
+                                    id: q.id,
+                                    title: q.title || 'Coding Challenge',
+                                    description: q.description || 'Solve this problem.',
+                                    difficulty: q.difficulty || 'Medium',
+                                    examples: (q.examples && q.examples.length > 0) ? q.examples : [{ input: 'Example input', output: 'Example output', explanation: 'No examples provided' }],
+                                    testCases: tcList,
+                                    defaultTestCases: tcList,
+                                    constraints: q.constraints || [],
+                                    starterCode: {
+                                        python: q.starterCode?.python || STRICT_TEMPLATES.python,
+                                        java: q.starterCode?.java || STRICT_TEMPLATES.java
+                                    }
+                                };
+                            });
+                            setQuestions(dynamicQuestions);
+                        } else if (data.config.questionCount) {
+                            setQuestions(CODING_QUESTIONS.slice(0, data.config.questionCount));
+                        }
+
+                        // Sync Time Limit
+                        if (data.config.timeLimit) {
+                            setTimeLeft(data.config.timeLimit * 60);
+                        }
+                        // Sync Test Intensity
+                        if (data.config.testIntensity) {
+                            setConfiguredTestCount(data.config.testIntensity);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load assessment config", e);
+            }
+        };
+
+        init();
     }, []);
 
 
@@ -367,11 +511,20 @@ const CandidateCodingAssessment = () => {
     const handleSubmit = async (forcedStatus = null) => {
         if (submitted) return;
 
+        const token = localStorage.getItem('candidateToken');
+        if (!token) {
+            if (!forcedStatus) alert("Session expired. Please login again.");
+            navigate('/portal/login');
+            return;
+        }
+
         // If proctoring auto-submit, clear everything and submit
         if (forcedStatus) setSubmitted(true);
 
-        const token = localStorage.getItem('candidateToken');
-        if (!token) return;
+        // Clear local storage IMMEDIATELY to prevent auto-resume/reload race conditions
+        localStorage.removeItem('currentAssessment');
+        localStorage.removeItem('candidateToken');
+        localStorage.removeItem('aptitudeQuestions');
 
         try {
             // Aggregate all code results
@@ -385,7 +538,7 @@ const CandidateCodingAssessment = () => {
                 finalResults.total += (res.total || 0);
             });
 
-            const response = await fetch('http://127.0.0.1:8000/api/assessments/submit/', {
+            const response = await fetch(`${API_URL}/api/assessments/submit/`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -400,13 +553,27 @@ const CandidateCodingAssessment = () => {
             if (response.ok) {
                 const data = await response.json();
                 setSubmitted(true);
-                // Extract score if returned
                 if (data.score !== undefined) {
                     setScoreResult(data.score * 10);
+                }
+            } else if (response.status === 401) {
+                if (!forcedStatus) {
+                    alert('Your session has expired. Please log in again to continue.');
+                    navigate('/portal/login');
+                }
+            } else if (response.status === 400) {
+                console.warn('[Submit] Assessment was already submitted — ignoring duplicate.');
+                setSubmitted(true);
+            } else {
+                if (!forcedStatus) {
+                    alert("Failed to submit assessment. Please try again.");
                 }
             }
         } catch (e) {
             console.error("Submission failed:", e);
+            if (!forcedStatus) {
+                alert("Network error. Please check connection.");
+            }
         }
     };
 
@@ -444,6 +611,90 @@ const CandidateCodingAssessment = () => {
 
     return (
         <div className="h-screen flex flex-col bg-gray-950 text-gray-300 overflow-hidden font-sans selection:bg-blue-500/30">
+
+            {/* ── Corner Camera Preview Widget (bottom-right, above console) ── */}
+            <div className="fixed bottom-6 right-4 z-40 group">
+                {/* Bounding box — solid colored border */}
+                <div style={{
+                    position: 'relative',
+                    borderRadius: '10px',
+                    overflow: 'hidden',
+                    width: '220px',
+                    height: '165px',
+                    background: '#111',
+                    border: suspectLabel ? '3px solid #ef4444' : '3px solid #22c55e',
+                    boxShadow: suspectLabel
+                        ? '0 0 0 1px #ef4444, 0 0 20px rgba(239,68,68,0.6)'
+                        : '0 0 0 1px #16a34a, 0 4px 20px rgba(0,0,0,0.25)',
+                    animation: suspectLabel ? 'suspectBlink 0.7s ease-in-out infinite alternate' : 'none',
+                    transition: 'border-color 0.3s ease, box-shadow 0.3s ease'
+                }}>
+                    <video ref={cameraVideoRef} autoPlay playsInline muted
+                        style={{ width: '100%', height: '100%', display: 'block', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+
+                    {/* Bounding box divs — positioned over video */}
+                    {boxes.map((box, i) => (
+                        <div key={i} style={{
+                            position: 'absolute',
+                            left: box.left,
+                            top: box.top,
+                            width: box.width,
+                            height: box.height,
+                            border: `2.5px solid ${box.color}`,
+                            boxShadow: `0 0 8px ${box.color}88`,
+                            pointerEvents: 'none',
+                            boxSizing: 'border-box',
+                            borderRadius: '2px',
+                        }}>
+                            {/* Small label only for suspicious items (not face) */}
+                            {box.label !== 'face' && (
+                                <span style={{
+                                    position: 'absolute', bottom: '-18px', left: '-1px',
+                                    background: box.color, color: '#fff',
+                                    fontSize: '8px', fontWeight: 700,
+                                    padding: '1px 4px', borderRadius: '0 0 3px 3px',
+                                    whiteSpace: 'nowrap',
+                                }}>
+                                    {box.label}
+                                </span>
+                            )}
+                        </div>
+                    ))}
+
+                    {/* LIVE / ALERT badge */}
+                    <div style={{ position: 'absolute', top: '7px', left: '7px', display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.7)', padding: '3px 8px', borderRadius: '20px' }}>
+                        <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: suspectLabel ? '#ef4444' : '#4ade80', animation: 'livePulse 1.2s ease-in-out infinite' }} />
+                        <span style={{ color: '#fff', fontSize: '9px', fontWeight: 700, letterSpacing: '0.07em' }}>{suspectLabel ? 'ALERT' : 'LIVE'}</span>
+                    </div>
+
+                    {/* Red tint overlay when suspect */}
+                    {suspectLabel && (
+                        <div style={{
+                            position: 'absolute', inset: 0,
+                            background: 'rgba(239,68,68,0.15)',
+                            pointerEvents: 'none'
+                        }} />
+                    )}
+                </div>
+
+                {/* Status label — only show when suspect detected */}
+                {suspectLabel && (
+                    <div style={{
+                        marginTop: '5px', textAlign: 'center', padding: '4px 8px', borderRadius: '8px',
+                        background: '#fef2f2', border: '2px solid #fca5a5', transition: 'all 0.3s ease'
+                    }}>
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: '#dc2626' }}>
+                            {suspectLabel}
+                        </span>
+                    </div>
+                )}
+
+                <style>{`
+                    @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+                    @keyframes suspectBlink { from{border-color:#ef4444;box-shadow:0 0 0 1px #ef4444,0 0 20px rgba(239,68,68,0.5)} to{border-color:#dc2626;box-shadow:0 0 0 1px #dc2626,0 0 28px rgba(239,68,68,0.9)} }
+                `}</style>
+            </div>
+
             {/* Warning Banner */}
             <AnimatePresence>
                 {showWarning && (

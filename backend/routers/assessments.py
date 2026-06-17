@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from typing import List, Optional
@@ -6,6 +6,7 @@ import string
 import random
 import os
 import copy
+from datetime import datetime
 import schemas, models, utils, database
 from .auth import get_current_user
 from services import ai_generator, email_templates, piston_service
@@ -18,8 +19,8 @@ router = APIRouter(
 @router.post("/assign/", response_model=schemas.AssignResponse)
 def assign_assessment(
     request: schemas.AssessmentCreateRequest,
-    # current_user: models.User = Depends(get_current_user), # Temporarily allow any or check role
-    db: Session = Depends(database.get_db)
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     # Admin sends list of candidates
     candidate_list = request.candidates
@@ -32,16 +33,12 @@ def assign_assessment(
     try:
         # Skip generation for Interview type (VAPI handles it dynamically)
         if round_type != "interview" and not config.get("generated_questions"):
-            print(f"Pre-generating questions for {round_type} assignment...")
             generated_qs = ai_generator.generate_questions(round_type, config)
             if generated_qs:
                 config["generated_questions"] = generated_qs
-                print(f"Successfully generated {len(generated_qs)} questions.")
             else:
-                print("Warning: AI generation returned empty.")
                 raise HTTPException(status_code=500, detail="AI failed to generate questions. Please try again.")
     except Exception as e:
-        print(f"Error pre-generating questions: {e}")
         raise HTTPException(status_code=500, detail=f"Generation Error: {str(e)}")
     # ---------------------------------------------
     
@@ -62,7 +59,8 @@ def assign_assessment(
                 email=email,
                 section="Imports", # Placeholder
                 stage=round_type,
-                status=models.CandidateStatus.Applied
+                status=models.CandidateStatus.Applied,
+                created_by=current_user.id
             )
             db.add(candidate)
             db.flush() # Get ID
@@ -112,6 +110,7 @@ def assign_assessment(
         candidate_record = db.query(models.Candidate).filter(models.Candidate.email == email).first()
         if candidate_record:
             candidate_record.stage = target_stage
+            candidate_record.created_by = current_user.id
             
             # Reset results for a fresh start in this stage
             candidate_record.status = models.CandidateStatus.In_Progress
@@ -123,7 +122,7 @@ def assign_assessment(
             # Log Promotion
             friendly_round = round_type.replace('_', ' ').title()
             log = models.ActivityLog(
-                user_id=None, 
+                user_id=current_user.id, 
                 action="invited",
                 target=candidate_record.name,
                 details=f"Invited to {friendly_round} Assessment"
@@ -156,16 +155,7 @@ def assign_assessment(
         # Generate Login Link (Manual Only)
         login_link = f"{frontend_url}/portal/login"
         
-        # DEBUG LOGGING (User Request)
-        try:
-            from datetime import datetime
-            with open("logs/email_debug.log", "a") as f:
-                 f.write(f"\n[{datetime.now()}] ASSIGNMENT:\n")
-                 f.write(f"  Candidate: {email}\n")
-                 f.write(f"  Password: {password_display}\n")
-                 f.write(f"  Link: {login_link}\n")
-        except Exception as e:
-            print(f"Log Error: {e}")
+
 
         html_body = email_templates.get_invitation_email_template(
             candidate_name=candidate_entry.get('name', 'Candidate'),
@@ -223,35 +213,18 @@ def get_my_latest_assessment(
             # Check if questions need to be generated (Lazy Generation)
             # Optimization: Skip for 'interview' as it uses VAPI dynamic generation
             if not assessment.config.get("generated_questions") and assessment.type != "interview":
-                print(f"Generating questions for Assessment {assessment.id} ({assessment.type})...")
-                
-                # Call AI Service
                 questions = ai_generator.generate_questions(assessment.type, assessment.config)
                 
                 if questions:
-                    # Update Config with Questions
                     new_config = dict(assessment.config)
                     new_config["generated_questions"] = questions
                     assessment.config = new_config
                     
                     db.commit()
                     db.refresh(assessment)
-                    print(f"Generated {len(questions)} questions successfully.")
-                else:
-                    print("Failed to generate questions from AI service.")
 
         return assessment
     except Exception as e:
-        error_msg = f"ERROR in get_my_latest_assessment: {e}\n"
-        print(error_msg)
-        import traceback
-        traceback_str = traceback.format_exc()
-        print(traceback_str)
-        
-        # Write to file so I can read it
-        with open("error_logs.txt", "a") as f:
-            f.write(f"--- ERROR ---\n{error_msg}\n{traceback_str}\n")
-            
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/start/{assessment_id}")
@@ -267,6 +240,9 @@ def start_assessment(
     
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
+        
+    if assessment.status == models.AssessmentStatus.completed:
+        raise HTTPException(status_code=400, detail="Assessment already completed")
         
     if not assessment.started_at:
         assessment.started_at = func.now()
@@ -307,10 +283,7 @@ def execute_code(
         question_config=question_config
     )
     
-    # LOGGING: Save debug info
-    print(f"\n====== FINAL CODE SENT TO PISTON ({request.language}) ======")
-    print(runner_code if runner_code else "FAILED TO GENERATE RUNNER")
-    print("===========================================================\n")
+
     
     if not runner_code:
         # Fallback to pure AI if wrapper fails (Safety Net)
@@ -320,12 +293,12 @@ def execute_code(
         
     # 2. Execute on Piston
     piston_res = piston_service.execute_code(request.language, runner_code)
-    print(f"--- PISTON RAW STATUS: {piston_res.get('status')} ---")
+
     
     # 3. Process Results (Strict Stream Parsing)
     if piston_res.get("status") == "success":
         raw_output = piston_res.get("output", "").strip()
-        print(f"--- PISTON RAW STDOUT ---\n{raw_output}\n--------------------------")
+
         results = []
         
         # New Robust Parsing Strategy: Extract lines between Markers
@@ -420,9 +393,67 @@ def execute_code(
         "feedback": analysis
     }
 
+def send_completion_emails(candidate_email: str, candidate_name: str, target_role: str, assessment_type: str, friendly_type: str, score_detail: str, created_by_id: Optional[int]):
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        completion_subject = "Assessment Completed - Thank You for Your Time"
+        completion_body = email_templates.get_completion_email_template(
+            candidate_name=candidate_name,
+            role_title=target_role,
+            round_type=assessment_type
+        )
+        utils.send_email(candidate_email, completion_subject, completion_body)
+        print(f"Completion email sent to {candidate_email}")
+        
+        # Send HR Notification if alerts enabled
+        settings_record = None
+        if created_by_id:
+            settings_record = db.query(models.GlobalSettings).filter(
+                models.GlobalSettings.created_by == created_by_id
+            ).first()
+        if not settings_record:
+            settings_record = db.query(models.GlobalSettings).filter(
+                models.GlobalSettings.key == "default"
+            ).first()
+            
+        if settings_record and settings_record.config:
+            notifications_conf = settings_record.config.get("notifications", {})
+            if notifications_conf.get("emailAlerts", True):
+                creator_user = None
+                if created_by_id:
+                    creator_user = db.query(models.User).filter(models.User.id == created_by_id).first()
+                
+                # Check if the creator email is a dummy/generic one, otherwise use it
+                hr_email = creator_user.email if (creator_user and not creator_user.email.endswith('.internal')) else notifications_conf.get("recipientEmail")
+                
+                # If recipient email is a dummy (e.g. hr@company.com), fallback to the synced admin email (gopalmuri1919@gmail.com)
+                if hr_email == "hr@company.com" or not hr_email:
+                    hr_email = "gopalmuri1919@gmail.com"
+
+                if hr_email:
+                    hr_subject = f"Candidate Assessment Submitted: {candidate_name}"
+                    hr_body = f"""
+                    <h3>Candidate Assessment Submission Alert</h3>
+                    <p><strong>Candidate Name:</strong> {candidate_name}</p>
+                    <p><strong>Email:</strong> {candidate_email}</p>
+                    <p><strong>Role:</strong> {target_role}</p>
+                    <p><strong>Assessment Type:</strong> {friendly_type}</p>
+                    <p><strong>Status/Score:</strong> {score_detail}</p>
+                    <br/>
+                    <p>You can view the full evaluation details in the Admin Dashboard.</p>
+                    """
+                    utils.send_email(hr_email, hr_subject, hr_body)
+                    print(f"HR notification email sent to {hr_email}")
+    except Exception as e:
+        print(f"Failed to send email notifications in background: {e}")
+    finally:
+        db.close()
+
 @router.post("/submit/", response_model=schemas.AssessmentResponse)
 def submit_assessment(
     payload: schemas.SubmissionPayload,
+    background_tasks: BackgroundTasks,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
@@ -460,36 +491,19 @@ def submit_assessment(
 
         correct_count = 0
         
-        # DEBUG: Print answer validation details
-        print("\n=== ASSESSMENT SCORING DEBUG ===")
-        print(f"Total Questions: {total_questions}")
-        print(f"Answer Key (first 5): {dict(list(answer_key.items())[:5])}")
-        print(f"Submitted Answers (first 5): {dict(list(payload.answers.items())[:5])}")
-        print(f"Answer Key Types: {[(k, type(k), v, type(v)) for k, v in list(answer_key.items())[:3]]}")
-        print(f"Submitted Types: {[(k, type(k), v, type(v)) for k, v in list(payload.answers.items())[:3]]}")
-        
         for q_idx, ans_idx in payload.answers.items():
             key_exists = str(q_idx) in answer_key
             if key_exists:
                 expected = answer_key[str(q_idx)]
-                # TYPE-SAFE COMPARISON: Convert both to int to handle type mismatches
                 try:
                     expected_int = int(expected) if not isinstance(expected, int) else expected
                     ans_int = int(ans_idx) if not isinstance(ans_idx, int) else ans_idx
                     is_correct = expected_int == ans_int
                 except (ValueError, TypeError):
-                    # Fallback to direct comparison if conversion fails
                     is_correct = expected == ans_idx
                 
-                if not is_correct:
-                    print(f"MISMATCH: Q{q_idx} - Expected {expected} (type: {type(expected)}), Got {ans_idx} (type: {type(ans_idx)})")
-                else:
+                if is_correct:
                     correct_count += 1
-            else:
-                print(f"KEY NOT FOUND: {q_idx} (type: {type(q_idx)}) not in answer_key")
-        
-        print(f"Final Correct Count: {correct_count}/{total_questions}")
-        print("=================================\n")
         
         # Scale to 10
         if total_questions > 0:
@@ -581,7 +595,7 @@ def submit_assessment(
         friendly_type = assessment.type.replace('_', ' ').title()
         score_detail = candidate.status.split(': ')[1] if ':' in candidate.status else 'Completed'
         log = models.ActivityLog(
-            user_id=None, # System action
+            user_id=candidate.created_by,
             action="completed",
             target=candidate.name,
             details=f"Completed {friendly_type} | Result: {score_detail}"
@@ -589,22 +603,17 @@ def submit_assessment(
         db.add(log)
         
         # --- SEND COMPLETION EMAIL (New) ---
-        try:
-             # FIX: Use Candidate's specific role if available
-            target_role = candidate.role if candidate.role else "Candidate"
-            
-            completion_subject = "Assessment Completed - Thank You for Your Time"
-            completion_body = email_templates.get_completion_email_template(
-                candidate_name=candidate.name,
-                role_title=target_role,
-                round_type=assessment.type
-            )
-            
-            # Send in background or direct? Direct for simplicity now.
-            utils.send_email(candidate.email, completion_subject, completion_body)
-            print(f"Completion email sent to {candidate.email}")
-        except Exception as e:
-            print(f"Failed to send completion email: {e}")
+        target_role = candidate.role if candidate.role else "Candidate"
+        background_tasks.add_task(
+            send_completion_emails,
+            candidate.email,
+            candidate.name,
+            target_role,
+            assessment.type,
+            friendly_type,
+            score_detail,
+            candidate.created_by
+        )
         # -----------------------------------
 
     db.commit()

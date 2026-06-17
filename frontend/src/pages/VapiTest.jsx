@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Vapi from '@vapi-ai/web';
 
 const VapiTest = () => {
-    const [publicKey, setPublicKey] = useState("85876843-8675-47b9-b5bd-f4387a97473d");
+    const [publicKey, setPublicKey] = useState(import.meta.env.VITE_VAPI_PUBLIC_KEY || "");
     const [assistantId, setAssistantId] = useState("4e176c4a-d5f7-4e6c-8e7c-5b3f2a1d9e8c");
     const [status, setStatus] = useState("idle");
     const [logs, setLogs] = useState([]);

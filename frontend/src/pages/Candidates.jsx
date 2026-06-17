@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import {
     Search, Filter, MoreHorizontal, User, Mail, CheckCircle, XCircle, Clock,
-    Eye, FileText, ArrowRight, Send, Bell, Pause, Trash2, Users
+    Eye, FileText, ArrowRight, Send, Bell, Pause, Trash2, Users, Download, ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import CandidateTable from '../components/CandidateTable';
+import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 import API_URL from '../apiConfig';
 
@@ -24,7 +27,8 @@ const AddCandidateModal = ({ isOpen, onClose, onAdd }) => {
             const response = await fetch(`${API_URL}/api/resume/candidates/`, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
                 },
                 body: JSON.stringify(formData)
             });
@@ -313,6 +317,160 @@ const Candidates = () => {
     const [candidates, setCandidates] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [showExportDropdown, setShowExportDropdown] = useState(false);
+
+    const handleExportExcel = () => {
+        if (candidates.length === 0) {
+            alert("No candidate data available to export.");
+            return;
+        }
+        const data = candidates.map((c, index) => ({
+            "S.No": index + 1,
+            "Name": c.name,
+            "Email": c.email,
+            "Job Role": c.role || 'N/A',
+            "Current Stage": c.stage,
+            "Status": c.status,
+            "Score": c.score !== undefined ? `${c.score}%` : '0%'
+        }));
+        
+        const worksheet = XLSX.utils.json_to_sheet(data);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Candidates");
+        
+        // Auto-fit column widths
+        const maxLen = {};
+        data.forEach(row => {
+            Object.keys(row).forEach(key => {
+                const val = String(row[key] || '');
+                maxLen[key] = Math.max(maxLen[key] || 0, val.length, key.length);
+            });
+        });
+        worksheet["!cols"] = Object.keys(maxLen).map(key => ({ wch: maxLen[key] + 3 }));
+
+        XLSX.writeFile(workbook, `Candidates_Export_Full_${new Date().toISOString().slice(0, 10)}.xlsx`);
+        setShowExportDropdown(false);
+    };
+
+    const handleExportPDF = () => {
+        if (candidates.length === 0) {
+            alert("No candidate data available to export.");
+            return;
+        }
+
+        const doc = new jsPDF();
+        
+        // Add Title Header
+        doc.setFontSize(18);
+        doc.setTextColor(93, 140, 44); // Brand Color #5d8c2c
+        doc.text("HiringAI - Full Candidate Dataset", 14, 20);
+        
+        doc.setFontSize(10);
+        doc.setTextColor(100, 100, 100);
+        doc.text(`Generated on: ${new Date().toLocaleString()} | Scope: FULL DATASET`, 14, 26);
+        doc.text(`Total Candidates: ${candidates.length}`, 14, 31);
+        
+        // Table Columns & Rows
+        const headers = [["S.No", "Name", "Email", "Role", "Stage", "Status", "Score"]];
+        const body = candidates.map((c, index) => [
+            index + 1,
+            c.name,
+            c.email,
+            c.role || 'N/A',
+            c.stage,
+            c.status,
+            c.score !== undefined ? `${c.score}%` : '0%'
+        ]);
+
+        autoTable(doc, {
+            startY: 36,
+            head: headers,
+            body: body,
+            theme: 'striped',
+            headStyles: { fillColor: [93, 140, 44] }, // #5d8c2c
+            styles: { fontSize: 8, cellPadding: 2 },
+            columnStyles: {
+                2: { cellWidth: 45 }
+            }
+        });
+
+        doc.save(`Candidates_Report_Full_${new Date().toISOString().slice(0, 10)}.pdf`);
+        setShowExportDropdown(false);
+    };
+
+    const handleExportWord = () => {
+        if (candidates.length === 0) {
+            alert("No candidate data available to export.");
+            return;
+        }
+
+        const tableRows = candidates.map((c, index) => `
+            <tr>
+                <td>${index + 1}</td>
+                <td style="font-weight: bold;">${c.name}</td>
+                <td>${c.email}</td>
+                <td>${c.role || 'N/A'}</td>
+                <td>${c.stage}</td>
+                <td>${c.status}</td>
+                <td>${c.score !== undefined ? `${c.score}%` : '0%'}</td>
+            </tr>
+        `).join('');
+
+        const htmlContent = `
+        <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+        <head>
+            <title>Candidates Full Dossier</title>
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; }
+                h1 { color: #5d8c2c; font-size: 24px; border-bottom: 2px solid #5d8c2c; padding-bottom: 8px; }
+                .meta { color: #666; font-size: 11px; margin-bottom: 24px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+                th { background-color: #5d8c2c; color: white; padding: 10px; text-align: left; font-size: 12px; font-weight: bold; border: 1px solid #ddd; }
+                td { padding: 8px 10px; font-size: 11px; border: 1px solid #ddd; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+            </style>
+        </head>
+        <body>
+            <h1>Candidates Full Dossier</h1>
+            <div class="meta">
+                Generated: ${new Date().toLocaleString()}<br/>
+                Report Scope: FULL DATASET<br/>
+                Total Active Records: ${candidates.length}
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>S.No</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Job Role</th>
+                        <th>Current Stage</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${tableRows}
+                </tbody>
+            </table>
+        </body>
+        </html>
+        `;
+
+        const blob = new Blob(['\ufeff' + htmlContent], {
+            type: 'application/msword'
+        });
+        
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Candidates_Dossier_Full_${new Date().toISOString().slice(0, 10)}.doc`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setShowExportDropdown(false);
+    };
 
     // Contextual Menu State
     const [menuState, setMenuState] = useState({
@@ -379,6 +537,16 @@ const Candidates = () => {
                 console.error("Error deleting candidate:", err);
                 alert("Error connecting to server.");
             }
+        } else if (action === 'view-resume') {
+            if (candidate.resume_file) {
+                let resumeUrl = candidate.resume_file;
+                if (!resumeUrl.startsWith('http')) {
+                    resumeUrl = `${API_URL}/media/resumes/${resumeUrl}`;
+                }
+                window.open(resumeUrl, '_blank');
+            } else {
+                alert("No resume file available for this candidate.");
+            }
         } else {
             console.log(`Unimplemented action: ${action}`);
         }
@@ -418,7 +586,7 @@ const Candidates = () => {
 
     return (
         <div className="min-h-screen bg-gray-50 pb-12 relative">
-            <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+            <div className="w-full space-y-6">
                 {/* Header Section */}
                 <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-4 sm:p-6">
                     <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
@@ -452,22 +620,6 @@ const Candidates = () => {
                     </div>
                 </div>
 
-                {/* Search and Filter Bar */}
-                <div className="bg-white border border-gray-200 rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row gap-4 shadow-sm">
-                    <div className="relative flex-1">
-                        <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                        <input
-                            type="text"
-                            placeholder="Search candidates..."
-                            className="w-full bg-gray-50 border-2 border-gray-200 rounded-xl pl-12 pr-4 py-3 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-400 transition-all font-medium hover:border-gray-300"
-                        />
-                    </div>
-                    <button className="px-5 py-3 bg-white border-2 border-gray-200 text-gray-700 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-gray-50 hover:border-gray-300 hover:text-gray-900 transition-all shadow-sm">
-                        <Filter className="w-4 h-4" />
-                        Filter
-                    </button>
-                </div>
-
                 {/* Candidates Table */}
                 <CandidateTable
                     candidates={candidates}
@@ -477,8 +629,29 @@ const Candidates = () => {
                     showStageColumn={true}
                     enableStageFilter={true}
                     enableScoreFilter={true}
+                    showAnalyticsAction={true}
                     onPromote={async (ids, stage) => {
                         if (!ids || ids.length === 0) return;
+
+                        // Check if promoting to Offer Sent or if any candidate will be auto-promoted to Offer Sent
+                        const selected = candidates.filter(c => ids.includes(c.id));
+                        const willReceiveOffer = stage === 'Offer Sent' || (stage === 'NEXT' && selected.some(c => c.stage === 'Technical Interview' || c.stage === 'HR Round'));
+
+                        if (willReceiveOffer) {
+                            const notDoneAnyRound = selected.filter(c => {
+                                const hasAptitude = c.analysis_data?.correct !== undefined || c.analysis_data?.score_percentage !== undefined;
+                                const hasCoding = c.analysis_data?.passed !== undefined;
+                                const hasInterview = c.analysis_data?.interview !== undefined;
+                                return !(hasAptitude || hasCoding || hasInterview);
+                            });
+
+                            if (notDoneAnyRound.length > 0) {
+                                const names = notDoneAnyRound.map(c => c.name).join(', ');
+                                if (!window.confirm(`WARNING: The following candidate(s) have NOT completed any test rounds (Aptitude, Coding, or Interview):\n${names}\n\nAre you sure you want to proceed with sending them the offer letter?`)) {
+                                    return;
+                                }
+                            }
+                        }
 
                         if (!window.confirm(`Promote ${ids.length} selected candidate(s) to ${stage === 'NEXT' ? 'their respective NEXT stages' : stage}?`)) return;
 

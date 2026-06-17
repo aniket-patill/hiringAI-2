@@ -391,6 +391,15 @@ def generate_coding_questions(config: dict):
     custom_notes = config.get("description", "")
     
     import time
+    example_tcs = []
+    for i in range(1, tc_count + 1):
+        example_tcs.append({
+            "id": i,
+            "input": {"nums": [i, i * 2]},
+            "expected": i * 3
+        })
+    example_tcs_json = json.dumps(example_tcs).replace("{", "{{").replace("}", "}}")
+
     prompt = f"""
     Generate {count} UNIQUE and varied professional coding challenge problem(s) similar to LeetCode.
     Current Time/Seed: {time.time()} (Ensure problems are different from previous generations)
@@ -428,11 +437,7 @@ def generate_coding_questions(config: dict):
                 "java": "class Solution {{\\n    public int solve(int[] nums) {{\\n        \\n    }}\\n}}",
                 "python": "def solve(nums):\\n    pass"
             }},
-            "testCases": [
-                {{"id": 1, "input": {{"nums": [1,2]}}, "expected": 3}},
-                {{"id": 2, "input": {{"nums": [5,10]}}, "expected": 15}},
-                {{"id": 3, "input": {{"nums": [0,0]}}, "expected": 0}}
-            ],
+            "testCases": {example_tcs_json},
             "examples": [
                 {{"input": "nums = [1, 2]", "output": "3", "explanation": "1 + 2 = 3, so the answer is 3."}},
                 {{"input": "nums = [5, 10]", "output": "15", "explanation": "5 + 10 = 15, so the answer is 15."}},
@@ -659,8 +664,6 @@ def call_llm(prompt, retries=2):
             
         except Exception as e:
             print(f"LLM Call Failed (Attempt {attempt+1}): {e}")
-            if 'content' in locals():
-                print(f"DEBUG: Raw content was:\n{content}")
             if attempt == retries - 1:
                 return [] # Give up after last retry
             import time

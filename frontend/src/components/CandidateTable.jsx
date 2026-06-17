@@ -10,6 +10,10 @@ import AnalyticsModal from './AnalyticsModal';
 import InterviewModal from './InterviewModal';
 import ScoreBreakdownModal from './ScoreBreakdownModal';
 import { motion, AnimatePresence } from 'framer-motion';
+import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import API_URL from '../apiConfig';
 
 const STAGE_FLOW = {
     'Resume Screening': ['Aptitude Round', 'Coding Round', 'Technical Interview'],
@@ -112,6 +116,47 @@ const PerformanceModal = ({ candidate, onClose }) => {
     );
 };
 
+const hasResumeFile = (resumeFile) => {
+    if (!resumeFile) return false;
+    const fileStr = String(resumeFile).trim().toLowerCase();
+    return fileStr !== "" && fileStr !== "null" && fileStr !== "undefined" && fileStr !== "n/a" && fileStr !== "none";
+};
+
+
+const ResumeModal = ({ resumeUrl, onClose }) => {
+    if (!resumeUrl) return null;
+
+    const isPdf = resumeUrl.toLowerCase().endsWith('.pdf');
+    const iframeUrl = isPdf 
+        ? resumeUrl 
+        : `https://docs.google.com/gview?url=${encodeURIComponent(resumeUrl)}&embedded=true`;
+
+    return (
+        <div className="fixed inset-0 z-[20000] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-5xl h-[90vh] overflow-hidden flex flex-col transform scale-100 transition-all">
+                <div className="p-5 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                    <h3 className="font-bold text-gray-900 flex items-center gap-2">
+                        <FileText className="text-green-600" size={20} />
+                        Candidate Resume Viewer
+                    </h3>
+                    <div className="flex items-center gap-3">
+                        <button onClick={onClose} className="p-1.5 hover:bg-gray-200 rounded-lg text-gray-400 hover:text-gray-600">
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+                </div>
+                <div className="flex-1 bg-gray-100 p-2">
+                    <iframe
+                        src={iframeUrl}
+                        title="Resume Viewer"
+                        className="w-full h-full border-0 rounded-xl bg-white"
+                    />
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 const CandidateTable = ({
     candidates,
@@ -138,6 +183,185 @@ const CandidateTable = ({
     const [scoreRange, setScoreRange] = useState('All Scores');
     const [recommendationFilter, setRecommendationFilter] = useState('All Recommendations'); // New State
     const [targetStage, setTargetStage] = useState('NEXT');
+    const [showExportDropdown, setShowExportDropdown] = useState(false);
+    const [viewResumeUrl, setViewResumeUrl] = useState(null);
+
+    // --- Data Export Utilities ---
+    const prepareExportData = (exportType) => {
+        let targetData = [];
+        if (exportType === 'selected') {
+            targetData = candidates.filter(c => selectedIds.has(c.id));
+        } else if (exportType === 'filtered') {
+            targetData = filteredCandidates;
+        } else {
+            targetData = candidates;
+        }
+
+        return targetData.map((c, index) => {
+            const rec = getRecommendation(c);
+            const status = getAssessmentStatus(c, currentStage);
+            const scoreData = getDisplayScore(c);
+            return {
+                "S.No": index + 1,
+                "Name": c.name,
+                "Email": c.email,
+                "Job Role": c.role || 'N/A',
+                "Current Stage": c.stage,
+                "Status": status,
+                "AI Recommendation": rec.label,
+                "Accuracy Score": scoreData.primary + (scoreData.secondary ? ` ${scoreData.secondary}` : '')
+            };
+        });
+    };
+
+    const handleExportExcel = (type) => {
+        const data = prepareExportData(type);
+        if (data.length === 0) {
+            alert("No data available to export.");
+            return;
+        }
+        const worksheet = XLSX.utils.json_to_sheet(data);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Candidates");
+        
+        // Auto-fit column widths
+        const maxLen = {};
+        data.forEach(row => {
+            Object.keys(row).forEach(key => {
+                const val = String(row[key] || '');
+                maxLen[key] = Math.max(maxLen[key] || 0, val.length, key.length);
+            });
+        });
+        worksheet["!cols"] = Object.keys(maxLen).map(key => ({ wch: maxLen[key] + 3 }));
+
+        XLSX.writeFile(workbook, `Candidates_Export_${type}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+        setShowExportDropdown(false);
+    };
+
+    const handleExportPDF = (type) => {
+        const data = prepareExportData(type);
+        if (data.length === 0) {
+            alert("No data available to export.");
+            return;
+        }
+
+        const doc = new jsPDF();
+        
+        // Add Title Header
+        doc.setFontSize(18);
+        doc.setTextColor(93, 140, 44); // Brand Color #5d8c2c
+        doc.text("HiringAI - Candidate Assessment Dataset", 14, 20);
+        
+        doc.setFontSize(10);
+        doc.setTextColor(100, 100, 100);
+        doc.text(`Generated on: ${new Date().toLocaleString()} | Scope: ${type.toUpperCase()}`, 14, 26);
+        doc.text(`Total Candidates: ${data.length}`, 14, 31);
+        
+        // Table Columns & Rows
+        const headers = [["S.No", "Name", "Email", "Role", "Stage", "Status", "AI Rec", "Score"]];
+        const body = data.map(row => [
+            row["S.No"],
+            row["Name"],
+            row["Email"],
+            row["Job Role"],
+            row["Current Stage"],
+            row["Status"],
+            row["AI Recommendation"],
+            row["Accuracy Score"]
+        ]);
+
+        autoTable(doc, {
+            startY: 36,
+            head: headers,
+            body: body,
+            theme: 'striped',
+            headStyles: { fillColor: [93, 140, 44] }, // #5d8c2c
+            styles: { fontSize: 8, cellPadding: 2 },
+            columnStyles: {
+                2: { cellWidth: 40 }
+            }
+        });
+
+        doc.save(`Candidates_Report_${type}_${new Date().toISOString().slice(0, 10)}.pdf`);
+        setShowExportDropdown(false);
+    };
+
+    const handleExportWord = (type) => {
+        const data = prepareExportData(type);
+        if (data.length === 0) {
+            alert("No data available to export.");
+            return;
+        }
+
+        const tableRows = data.map(row => `
+            <tr>
+                <td>${row["S.No"]}</td>
+                <td style="font-weight: bold;">${row["Name"]}</td>
+                <td>${row["Email"]}</td>
+                <td>${row["Job Role"]}</td>
+                <td>${row["Current Stage"]}</td>
+                <td>${row["Status"]}</td>
+                <td>${row["AI Recommendation"]}</td>
+                <td>${row["Accuracy Score"]}</td>
+            </tr>
+        `).join('');
+
+        const htmlContent = `
+        <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+        <head>
+            <title>Candidate Assessment Dossier</title>
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; }
+                h1 { color: #5d8c2c; font-size: 24px; border-bottom: 2px solid #5d8c2c; padding-bottom: 8px; }
+                .meta { color: #666; font-size: 11px; margin-bottom: 24px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+                th { background-color: #5d8c2c; color: white; padding: 10px; text-align: left; font-size: 12px; font-weight: bold; border: 1px solid #ddd; }
+                td { padding: 8px 10px; font-size: 11px; border: 1px solid #ddd; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+            </style>
+        </head>
+        <body>
+            <h1>Candidate Assessment Dossier</h1>
+            <div class="meta">
+                Generated: ${new Date().toLocaleString()}<br/>
+                Report Scope: ${type.toUpperCase()}<br/>
+                Total Active Records: ${data.length}
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>S.No</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Job Role</th>
+                        <th>Current Stage</th>
+                        <th>Status</th>
+                        <th>AI Recommendation</th>
+                        <th>Accuracy Score</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${tableRows}
+                </tbody>
+            </table>
+        </body>
+        </html>
+        `;
+
+        const blob = new Blob(['\ufeff' + htmlContent], {
+            type: 'application/msword'
+        });
+        
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Candidates_Dossier_${type}_${new Date().toISOString().slice(0, 10)}.doc`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setShowExportDropdown(false);
+    };
 
     // Sort Config
     const [sortConfig, setSortConfig] = useState({ key: 'score', direction: 'desc' });
@@ -281,11 +505,32 @@ const CandidateTable = ({
 
         if (!c.analysis_data?.reasoning) {
             const score = c.score || 0;
-            if (score >= 88) return "Strong candidate profile.";
-            if (score >= 60) return "Meets criteria.";
-            return "Does not meet requirements.";
+            if (score >= 88) return "Strong candidate profile with excellent skill alignment.";
+            if (score >= 60) return "Candidate meets the core position requirements.";
+            return "Candidate does not meet the minimum requirements.";
         }
-        return c.analysis_data.reasoning.split('.')[0] + ".";
+
+        const reasoning = c.analysis_data.reasoning || '';
+
+        // Detect and suppress raw LLM/API error messages — never show technical errors to users
+        const isErrorMessage = (
+            reasoning.toLowerCase().includes('api') ||
+            reasoning.toLowerCase().includes('rate-limit') ||
+            reasoning.toLowerCase().includes('failed') ||
+            reasoning.toLowerCase().includes('groq') ||
+            reasoning.toLowerCase().includes('error') ||
+            reasoning.toLowerCase().includes('key')
+        );
+
+        if (isErrorMessage) {
+            const score = c.score || 0;
+            if (score >= 88) return "Strong candidate profile with excellent skill alignment.";
+            if (score >= 75) return "Candidate shows strong alignment with job requirements.";
+            if (score >= 60) return "Candidate meets the core position requirements.";
+            return "Candidate does not meet the minimum required criteria.";
+        }
+
+        return reasoning.split('.')[0] + ".";
     };
 
     const hasCurrentStageData = (c, stage) => {
@@ -443,131 +688,196 @@ const CandidateTable = ({
 
     return (
         <div className="space-y-5">
-            {selectedIds.size > 0 ? (
-                <div className="p-4 bg-blue-50 border-b border-blue-100 flex justify-between items-center animate-in fade-in duration-200">
-                    <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2">
-                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold">
-                                {selectedIds.size}
-                            </span>
-                            <span className="text-sm font-bold text-blue-900">Selected</span>
-                            <button
-                                onClick={() => setSelectedIds(new Set())}
-                                className="text-xs text-blue-600 hover:text-blue-800 font-medium hover:underline ml-2"
-                            >
-                                Clear Selection
-                            </button>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        {onPromote && currentStage !== 'Technical Interview' && validTargetStages.length > 0 && (
-                            <div className="flex items-center gap-2 mr-2">
-                                <span className="text-xs font-semibold text-blue-800">To:</span>
-                                <select
-                                    value={targetStage}
-                                    onChange={(e) => setTargetStage(e.target.value)}
-                                    className="h-9 px-2 text-xs font-medium text-blue-900 bg-white border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none shadow-sm cursor-pointer"
-                                >
-                                    <option value="NEXT">Auto (Next Stage)</option>
-                                    {validTargetStages.map(s => (
-                                        <option key={s} value={s}>{s}</option>
-                                    ))}
-                                </select>
-                            </div>
-                        )}
-
-                        {onDelete && (
-                            <PromoteAction
-                                label="Delete"
-                                variant="red"
-                                onClick={() => onDelete(Array.from(selectedIds))}
-                            />
-                        )}
-                        {currentStage === 'Technical Interview' ? (
-                            onReleaseOffer && (
-                                <PromoteAction
-                                    label="Release Offer"
-                                    variant="green"
-                                    onClick={() => onReleaseOffer(Array.from(selectedIds))}
-                                />
-                            )
-                        ) : (
-                            onPromote && (
-                                <PromoteAction
-                                    label={targetStage === 'NEXT' ? "Promote →" : "Promote"}
-                                    variant="blue"
-                                    onClick={() => onPromote(Array.from(selectedIds), targetStage)}
-                                />
-                            )
-                        )}
-                    </div>
+            {/* Search and Filters Bar (Always Visible) */}
+            <div className="p-4 bg-white border-b border-gray-100 flex flex-wrap items-center gap-3 rounded-xl shadow-sm border border-gray-200">
+                {/* Search */}
+                <div className="relative flex-1 min-w-[200px]">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
+                    <input
+                        type="text"
+                        placeholder="Search candidates..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
+                    />
                 </div>
-            ) : (
-                <div className="p-4 bg-white border-b border-gray-100 flex flex-wrap items-center gap-3">
-                    {/* Search */}
-                    <div className="relative flex-1 min-w-[200px]">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
-                        <input
-                            type="text"
-                            placeholder="Search candidates..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                        />
-                    </div>
 
-                    {/* Filters */}
-                    {enableStageFilter && (
-                        <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
-                            {availableStages.map(s => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                    )}
-                    {showRoleColumn && (
-                        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
-                            {availableRoles.map(r => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                    )}
-                    {enableScoreFilter && (
-                        <select value={scoreRange} onChange={(e) => setScoreRange(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
-                            <option value="All Scores">All Scores</option>
-                            <option value="90+">90% +</option>
-                            <option value="80-90">80% - 90%</option>
-                            <option value="70-80">70% - 80%</option>
-                            <option value="Below 70">Below 70%</option>
-                        </select>
+                {/* Filters */}
+                {enableStageFilter && (
+                    <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
+                        {availableStages.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                )}
+                {showRoleColumn && (
+                    <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
+                        {availableRoles.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                )}
+                {enableScoreFilter && (
+                    <select value={scoreRange} onChange={(e) => setScoreRange(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
+                        <option value="All Scores">All Scores</option>
+                        <option value="90+">90% +</option>
+                        <option value="80-90">80% - 90%</option>
+                        <option value="70-80">70% - 80%</option>
+                        <option value="Below 70">Below 70%</option>
+                    </select>
+                )}
+                {enableRecommendationFilter && (
+                    <select value={recommendationFilter} onChange={(e) => setRecommendationFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
+                        <option value="All Recommendations">AI Recommendation</option>
+                        <option value="Strongly Recommend">Strongly Recommend (88%+)</option>
+                        <option value="Recommend">Recommend (75-87%)</option>
+                        <option value="Borderline">Borderline (60-74%)</option>
+                        <option value="Not Recommended">Not Recommended (&lt;60%)</option>
+                    </select>
+                )}
+                {enableStatusFilter && (
+                    <select value={filter} onChange={(e) => setFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
+                        <option value="All">All Statuses</option>
+                        <option value="In Progress">In Progress</option>
+                        <option value="Completed">Completed</option>
+                        <option value="Rejected">Rejected</option>
+                    </select>
+                )}
 
-                    )}
-                    {enableRecommendationFilter && (
-                        <select value={recommendationFilter} onChange={(e) => setRecommendationFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
-                            <option value="All Recommendations">AI Recommendation</option>
-                            <option value="Strongly Recommend">Strongly Recommend (88%+)</option>
-                            <option value="Recommend">Recommend (75-87%)</option>
-                            <option value="Borderline">Borderline (60-74%)</option>
-                            <option value="Not Recommended">Not Recommended (&lt;60%)</option>
-                        </select>
-                    )}
-                    {enableStatusFilter && (
-                        <select value={filter} onChange={(e) => setFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-slate-800 font-bold focus:ring-2 focus:ring-green-500 outline-none">
-                            <option value="All">All Statuses</option>
-                            <option value="In Progress">In Progress</option>
-                            <option value="Completed">Completed</option>
-                            <option value="Rejected">Rejected</option>
-                        </select>
-                    )}
-
-                    {onRefresh && (
+                <div className="ml-auto">
+                    {/* Premium Data Export Dropdown */}
+                    <div className="relative">
                         <button
-                            onClick={onRefresh}
-                            className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg border border-gray-200 transition-all flex items-center gap-2"
-                            title="Refresh Data"
+                            onClick={() => setShowExportDropdown(!showExportDropdown)}
+                            className="px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 hover:text-gray-900 border border-gray-200 rounded-lg text-sm font-bold transition-all flex items-center gap-2 shadow-sm focus:ring-2 focus:ring-green-500/20"
                         >
-                            <RefreshCcw size={18} />
-                            <span className="hidden sm:inline text-xs font-bold uppercase">Sync</span>
+                            <Download size={16} className="text-gray-500" />
+                            <span>Export</span>
+                            <ChevronDown size={14} className={`text-gray-400 transition-transform ${showExportDropdown ? 'rotate-180' : ''}`} />
                         </button>
-                    )}
+                        
+                        <AnimatePresence>
+                            {showExportDropdown && (
+                                <>
+                                    <div className="fixed inset-0 z-10" onClick={() => setShowExportDropdown(false)} />
+                                    <motion.div
+                                        initial={{ opacity: 0, y: 10 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0, y: 10 }}
+                                        className="absolute right-0 mt-2 w-72 bg-white border border-gray-100 rounded-xl shadow-xl z-20 py-2 origin-top-right overflow-hidden"
+                                    >
+                                        <div className="px-4 py-2 border-b border-gray-100 bg-gray-50/50">
+                                            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Select Export Scope</span>
+                                        </div>
+                                        
+                                        {/* Scope Sections */}
+                                        {['selected', 'filtered', 'all'].map((scope) => {
+                                            const disabled = scope === 'selected' && selectedIds.size === 0;
+                                            const count = scope === 'selected' ? selectedIds.size : scope === 'filtered' ? filteredCandidates.length : candidates.length;
+                                            
+                                            return (
+                                                <div key={scope} className={`border-b border-gray-50 last:border-0 ${disabled ? 'opacity-50' : ''}`}>
+                                                    <div className="px-4 py-1.5 flex justify-between items-center text-xs font-semibold text-gray-505">
+                                                        <span className="capitalize">{scope} ({count})</span>
+                                                    </div>
+                                                    <div className="flex px-2 pb-1.5 gap-1">
+                                                        <button
+                                                            disabled={disabled}
+                                                            onClick={() => handleExportExcel(scope)}
+                                                            className="flex-1 px-2.5 py-1.5 bg-green-50 hover:bg-green-100 text-green-700 text-xs font-bold rounded-lg border border-green-200/50 transition-colors flex items-center justify-center gap-1 disabled:pointer-events-none"
+                                                        >
+                                                            Excel
+                                                        </button>
+                                                        <button
+                                                            disabled={disabled}
+                                                            onClick={() => handleExportPDF(scope)}
+                                                            className="flex-1 px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold rounded-lg border border-red-200/50 transition-colors flex items-center justify-center gap-1 disabled:pointer-events-none"
+                                                        >
+                                                            PDF
+                                                        </button>
+                                                        <button
+                                                            disabled={disabled}
+                                                            onClick={() => handleExportWord(scope)}
+                                                            className="flex-1 px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-lg border border-blue-200/50 transition-colors flex items-center justify-center gap-1 disabled:pointer-events-none"
+                                                        >
+                                                            Word
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </motion.div>
+                                </>
+                            )}
+                        </AnimatePresence>
+                    </div>
                 </div>
-            )
-            }
+            </div>
+
+            {/* Bulk Actions Panel (Shows when candidates are selected) */}
+            <AnimatePresence>
+                {selectedIds.size > 0 && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="p-4 bg-blue-50 border border-blue-100 rounded-xl flex justify-between items-center shadow-sm"
+                    >
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold">
+                                    {selectedIds.size}
+                                </span>
+                                <span className="text-sm font-bold text-blue-900">Selected</span>
+                                <button
+                                    onClick={() => setSelectedIds(new Set())}
+                                    className="text-xs text-blue-600 hover:text-blue-800 font-medium hover:underline ml-2"
+                                >
+                                    Clear Selection
+                                </button>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {onPromote && currentStage !== 'Technical Interview' && validTargetStages.length > 0 && (
+                                <div className="flex items-center gap-2 mr-2">
+                                    <span className="text-xs font-semibold text-blue-800">To:</span>
+                                    <select
+                                        value={targetStage}
+                                        onChange={(e) => setTargetStage(e.target.value)}
+                                        className="h-9 px-2 text-xs font-medium text-blue-900 bg-white border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none shadow-sm cursor-pointer"
+                                    >
+                                        <option value="NEXT">Auto (Next Stage)</option>
+                                        {validTargetStages.map(s => (
+                                            <option key={s} value={s}>{s}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {onDelete && (
+                                <PromoteAction
+                                    label="Delete"
+                                    variant="red"
+                                    onClick={() => onDelete(Array.from(selectedIds))}
+                                />
+                            )}
+                            {currentStage === 'Technical Interview' ? (
+                                onReleaseOffer && (
+                                    <PromoteAction
+                                        label="Release Offer"
+                                        variant="green"
+                                        onClick={() => onReleaseOffer(Array.from(selectedIds))}
+                                    />
+                                )
+                            ) : (
+                                onPromote && (
+                                    <PromoteAction
+                                        label={targetStage === 'NEXT' ? "Promote →" : "Promote"}
+                                        variant="blue"
+                                        onClick={() => onPromote(Array.from(selectedIds), targetStage)}
+                                    />
+                                )
+                            )}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             <div className={`bg-white border border-gray-200 rounded-xl shadow-md overflow-x-auto ${!['Dashboard', 'All'].includes(currentStage) ? '[&::-webkit-scrollbar]:hidden [scrollbar-width:none]' : ''}`}>
                 <table className="w-full text-left min-w-[1000px]">
@@ -734,12 +1044,30 @@ const CandidateTable = ({
                                     {showAnalyticsAction && (
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex justify-end gap-2">
-                                                <button
-                                                    onClick={() => setViewCandidate(c)}
-                                                    className="px-3 py-1.5 text-[10px] font-bold text-green-600 hover:text-white hover:bg-green-600 bg-white border border-green-200 rounded transition-colors"
-                                                >
-                                                    Analysis
-                                                </button>
+                                                {hasResumeFile(c.resume_file) ? (
+                                                    <>
+                                                        <button
+                                                            onClick={() => setViewCandidate(c)}
+                                                            className="px-3 py-1.5 text-[10px] font-bold text-green-600 hover:text-white hover:bg-green-600 bg-white border border-green-200 rounded transition-colors"
+                                                        >
+                                                            Analysis
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                let resumeUrl = c.resume_file;
+                                                                if (!resumeUrl.startsWith('http')) {
+                                                                    resumeUrl = `${API_URL}/media/resumes/${resumeUrl}`;
+                                                                }
+                                                                setViewResumeUrl(resumeUrl);
+                                                            }}
+                                                            className="px-3 py-1.5 text-[10px] font-bold text-blue-600 hover:text-white hover:bg-blue-600 bg-white border border-blue-200 rounded transition-colors flex items-center gap-1"
+                                                        >
+                                                            <FileText size={10} /> Resume
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    !c.analysis_data?.interview?.transcript && <span className="text-xs text-gray-400 font-medium mr-4">-</span>
+                                                )}
                                                 {['Technical Interview', 'Offer Sent', 'Hired'].includes(c.stage) && c.analysis_data?.interview?.transcript && (
                                                     <button
                                                         onClick={() => setViewInterview(c)}
@@ -759,7 +1087,16 @@ const CandidateTable = ({
             </div>
 
             <AnimatePresence>
-                {viewCandidate && <AnalyticsModal candidate={viewCandidate} onClose={() => setViewCandidate(null)} />}
+                {viewCandidate && (
+                    <AnalyticsModal 
+                        candidate={viewCandidate} 
+                        onClose={() => setViewCandidate(null)} 
+                        onViewResume={(url) => {
+                            setViewCandidate(null);
+                            setViewResumeUrl(url);
+                        }}
+                    />
+                )}
                 {viewPerformance && <PerformanceModal candidate={viewPerformance} onClose={() => setViewPerformance(null)} />}
                 {viewInterview && <InterviewModal candidate={viewInterview} onClose={() => setViewInterview(null)} />}
                 {viewScoreBreakdown && (
@@ -773,6 +1110,7 @@ const CandidateTable = ({
                         }}
                     />
                 )}
+                {viewResumeUrl && <ResumeModal resumeUrl={viewResumeUrl} onClose={() => setViewResumeUrl(null)} />}
             </AnimatePresence>
         </div >
     );
