@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Layout, Users, Shield, LogOut, Bell, UserCircle } from 'lucide-react';
+import { Layout, Users, Shield, LogOut, Bell, UserCircle, FileSearch, UserCheck, SlidersHorizontal } from 'lucide-react';
 import CandidateLoginModal from './CandidateLoginModal';
 import { UserButton } from '@clerk/clerk-react';
 import API_URL from '../apiConfig';
@@ -120,38 +120,41 @@ const GlobalNavbar = () => {
         return <p className="text-sm text-gray-800"><span className="font-bold">{n.user_name || 'System'}</span> {n.action} <span className="font-medium">{n.target}</span></p>;
     };
 
+    const navItems = [
+        { path: '/resume-screening', label: 'Resume Screening', icon: FileSearch },
+        { path: '/screened-candidates', label: 'Screened Candidates', icon: UserCheck },
+        { path: '/settings', label: 'Settings', icon: SlidersHorizontal },
+    ];
+
     return (
         <>
-            <nav className="h-16 bg-white border-b border-gray-200 fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 shadow-sm">
+            <nav className="h-16 bg-white/95 backdrop-blur-md border-b border-gray-200/80 fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
                 {/* Logo Section */}
                 <div className="flex items-center gap-5">
                     <img src="/logo_main.png" alt="ThirdEye Data Logo" className="h-8 w-auto object-contain" />
-                    <div className="hidden sm:block w-[1.5px] h-8 bg-gray-400" />
+                    <div className="hidden sm:block w-[1.5px] h-8 bg-gray-300" />
                     <span className="text-xl font-bold text-[#5d8c2c] tracking-tight mt-3.5">HiringAI</span>
                 </div>
 
-                {/* Center Navigation Links (Enterprise Style) */}
-                <div className="hidden md:flex items-center gap-4">
-                    <Link
-                        to="/dashboard"
-                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/dashboard') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
-                    >
-                        Dashboard
-                    </Link>
-
-                    <Link
-                        to="/analytics"
-                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/analytics') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
-                    >
-                        Analytics
-                    </Link>
-
-                    <Link
-                        to="/settings"
-                        className={`text-sm font-medium px-4 py-2 rounded-lg transition-all ${isActive('/settings') ? 'bg-white text-black font-semibold shadow-sm border border-gray-100' : 'text-black hover:bg-gray-50'}`}
-                    >
-                        Settings
-                    </Link>
+                {/* Center Navigation — Premium Pill Tabs */}
+                <div className="hidden md:flex items-center bg-gray-100/80 rounded-xl p-1 gap-0.5">
+                    {navItems.map(({ path, label, icon: Icon }) => {
+                        const active = isActive(path);
+                        return (
+                            <Link
+                                key={path}
+                                to={path}
+                                className={`relative flex items-center gap-2 text-sm font-semibold px-5 py-2 rounded-lg transition-all duration-300 ${
+                                    active
+                                        ? 'bg-gradient-to-r from-[#5d8c2c] to-[#4a7a1f] text-white shadow-md shadow-green-200/50'
+                                        : 'text-gray-600 hover:text-gray-900 hover:bg-white/70'
+                                }`}
+                            >
+                                <Icon size={16} className={active ? 'text-white/90' : 'text-gray-400'} />
+                                {label}
+                            </Link>
+                        );
+                    })}
                 </div>
 
                 {/* Right Section: Profile & Actions */}

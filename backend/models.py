@@ -86,6 +86,7 @@ class Candidate(Base):
     stage = Column(String(50), default=CandidateStage.Resume_Screening)
     resume_file = Column(String(255), nullable=True) # File path
     full_text = Column(Text, nullable=True) # Full resume text for screening
+    phone = Column(String(50), nullable=True)  # Phone from resume
     score = Column(Float, default=0.0)
     analysis_data = Column(JSON, nullable=True) # AI Breakdown
     hashed_password = Column(String(255), nullable=True) # Added for separate auth

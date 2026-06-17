@@ -6,15 +6,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-from . import groq_client
+from . import gemini_client
 
 
-GROQ_API_KEY = "resilient" if groq_client.has_groq_key() else None
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_API_KEY = "resilient" if gemini_client.has_gemini_key() else None
 
 def generate_questions(assessment_type: str, config: dict):
-    if not GROQ_API_KEY:
-        print("ERROR: GROQ_API_KEY not found.")
+    if not GEMINI_API_KEY:
+        print("ERROR: GEMINI_API_KEY not found.")
         return []
 
     if assessment_type == "aptitude":
@@ -53,7 +52,7 @@ def generate_interview_questions(config: dict):
         return [{"id": 1, "question": f"Tell me about your experience with {focus_area}.", "type": "verbal"}]
 
 def evaluate_code(code: str, language: str, question: dict, test_cases: list):
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return {"error": "AI Service Unavailable"}
 
     prompt = f"""
@@ -97,7 +96,7 @@ def generate_runner_code(code: str, language: str, test_cases: list, question_co
     If the question_config contains a language-specific runner template, it uses that.
     Otherwise, it falls back to a generic template.
     """
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return None
 
     marker_start = "---EXECUTION_RESULT_START---"
@@ -315,7 +314,7 @@ def analyze_error(code: str, error_message: str):
     """
     Analyzes execution error to provide hints.
     """
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return "Analysis unavailable."
 
     prompt = f"""
@@ -600,73 +599,21 @@ def extract_json_block(text: str) -> str:
     return ""
 
 def call_llm(prompt, retries=2):
-    data = {
-        "model": "llama-3.1-8b-instant", 
-        "messages": [
-            {"role": "system", "content": "You are a helpful AI that generates assessment questions in strict JSON format."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
-    }
-
     for attempt in range(retries):
         try:
-            response = groq_client.execute_groq_request(GROQ_API_URL, data, timeout=30)
-            if response.status_code != 200:
-                print(f"LLM API Error (Attempt {attempt+1}): {response.status_code} - {response.text}")
-                continue # Retry
-
-            result = response.json()
-            content = result['choices'][0]['message']['content']
-            
-            # Robust JSON extraction using matching block parser
-            block = extract_json_block(content)
-            if block:
-                try:
-                    return json.loads(block)
-                except Exception as parse_err:
-                    print(f"Direct block parse failed, attempting fallback healing: {parse_err}")
-            
-            # Fallback parse & heal common issues
-            clean_content = block.strip() if block else content.strip()
-            if clean_content.startswith("```"):
-                import re
-                clean_content = re.sub(r'^```(?:json)?\s*', '', clean_content)
-                clean_content = re.sub(r'\s*```$', '', clean_content)
-            clean_content = clean_content.strip()
-            
-            # Extract main JSON block
-            first_bracket = clean_content.find('[')
-            if first_bracket == -1:
-                first_bracket = clean_content.find('{')
-            last_bracket = clean_content.rfind(']')
-            if last_bracket == -1:
-                last_bracket = clean_content.rfind('}')
-                
-            if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
-                clean_content = clean_content[first_bracket:last_bracket+1]
-                
-            # Heal trailing commas in arrays/objects
-            import re
-            clean_content = re.sub(r',\s*([\]}])', r'\1', clean_content)
-            
-            try:
-                return json.loads(clean_content)
-            except json.JSONDecodeError:
-                # Last resort Single-Quote healing
-                try:
-                    healed = re.sub(r"([{,]\s*)'([^']+)'\s*:", r'\1"\2":', clean_content)
-                    healed = re.sub(r"'\s*([,}])", r'"\1', healed)
-                    healed = re.sub(r"([{,]\s*)'", r'\1"', healed)
-                    return json.loads(healed)
-                except Exception as final_err:
-                    raise final_err
+            result = gemini_client.call_gemini(
+                prompt=prompt,
+                system_prompt="You are a helpful AI that generates assessment questions in strict JSON format.",
+                temperature=0.7,
+                json_mode=True
+            )
+            return result
             
         except Exception as e:
-            print(f"LLM Call Failed (Attempt {attempt+1}): {e}")
+            print(f"Gemini LLM Call Failed (Attempt {attempt+1}): {e}")
             if attempt == retries - 1:
-                return [] # Give up after last retry
+                return []
             import time
-            time.sleep(1) # Wait 1s before retry
+            time.sleep(1)
             
     return []

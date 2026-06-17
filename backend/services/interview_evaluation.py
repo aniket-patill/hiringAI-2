@@ -1,7 +1,7 @@
 import os
 import json
 from dotenv import load_dotenv
-from . import groq_client
+from . import gemini_client
 
 load_dotenv()
 
@@ -89,19 +89,12 @@ Return ONLY valid JSON in this exact format:
 """
     
     try:
-        def make_call(client):
-            return client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": "You are an expert technical interview evaluator. Return only valid JSON."},
-                    {"role": "user", "content": evaluation_prompt}
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"}
-            )
-            
-        response = groq_client.call_groq_sdk(make_call)
-        result = json.loads(response.choices[0].message.content)
+        result = gemini_client.call_gemini(
+            prompt=evaluation_prompt,
+            system_prompt="You are an expert technical interview evaluator. Return only valid JSON.",
+            temperature=0.3,
+            json_mode=True
+        )
         
         # Ensure all required fields exist with defaults
         return {

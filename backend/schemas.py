@@ -84,6 +84,7 @@ class CandidateResponse(BaseModel):
     id: int
     name: str
     email: str
+    phone: Optional[str] = None
     role: str
     status: str
     stage: str

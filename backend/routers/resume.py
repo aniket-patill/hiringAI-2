@@ -50,7 +50,11 @@ def get_keyword_score(resume_text: str, jd_text: str):
 
 def extract_single_resume(file_path: str, filename: str):
     try:
-        full_text = RAGService.extract_text_from_pdf(file_path)
+        suffix = os.path.splitext(filename)[1].lower()
+        if suffix in [".docx", ".doc"]:
+            full_text = RAGService.extract_text_from_docx(file_path)
+        else:
+            full_text = RAGService.extract_text_from_pdf(file_path)
         candidate_info = RAGService.extract_candidate_info(full_text, filename)
         return {
             "file": filename,
@@ -70,6 +74,34 @@ def extract_single_resume(file_path: str, filename: str):
             "full_text": ""
         }
 
+def _build_professional_summary(candidate_name: str, score: float, matched_skills: list, missing_skills: list, jd_title: str) -> str:
+    """Generate a clean, professional candidate summary from keyword match data."""
+    matched_count = len(matched_skills)
+    missing_count = len(missing_skills)
+    total_skills = matched_count + missing_count
+    
+    # Build strength description
+    if matched_count > 0:
+        top_skills = ", ".join(matched_skills[:5])
+        strength_text = f"demonstrates proficiency in {top_skills}"
+    else:
+        strength_text = "shows limited alignment with the required technical stack"
+    
+    # Build overall assessment
+    if score >= 70:
+        verdict = f"{candidate_name} is a strong match for the {jd_title} role, with {matched_count} out of {total_skills} key skills aligned. The candidate {strength_text}, indicating solid technical readiness for this position."
+    elif score >= 40:
+        verdict = f"{candidate_name} shows moderate alignment for the {jd_title} role, matching {matched_count} of {total_skills} required skills. The candidate {strength_text}, but has gaps in {missing_count} areas that may require evaluation."
+    else:
+        verdict = f"{candidate_name} has limited alignment for the {jd_title} role, matching only {matched_count} of {total_skills} required skills. The candidate {strength_text}. Further review is recommended to assess transferable experience."
+    
+    # Add gap note if applicable
+    if missing_count > 0 and missing_count <= 5:
+        gap_text = ", ".join(missing_skills[:3])
+        verdict += f" Key gaps include {gap_text}."
+    
+    return verdict
+
 def run_llm_screening(candidate_data: dict, job_description: str, jd_title: str):
     candidate_name = candidate_data['candidate_info'].get('name', candidate_data['file'])
     print(f"   [LLM Start] Running Groq screening for {candidate_name}...")
@@ -82,14 +114,19 @@ def run_llm_screening(candidate_data: dict, job_description: str, jd_title: str)
         print(f"   [LLM Success] Completed Groq screening for {candidate_name} | AI Score: {candidate_data['score']}%")
     except Exception as e:
         print(f"   [LLM Error] Groq screening failed for {candidate_name} due to: {e}. Falling back to Stage 1 keyword score.")
-        candidate_data["score"] = candidate_data["keyword_score"]
-        candidate_data["reasoning"] = f"Groq API Error ({e}). Safely fell back to local keyword match score."
+        score = candidate_data["keyword_score"]
+        matched = candidate_data["matched_skills"]
+        missing = candidate_data["missing_skills"]
+        reasoning = _build_professional_summary(candidate_name, score, matched, missing, jd_title)
+        
+        candidate_data["score"] = score
+        candidate_data["reasoning"] = reasoning
         candidate_data["analysis"] = {
-            "score": candidate_data["keyword_score"],
+            "score": score,
             "extracted_role": jd_title,
-            "reasoning": candidate_data["reasoning"],
-            "key_skills_match": candidate_data["matched_skills"],
-            "missing_skills": candidate_data["missing_skills"]
+            "reasoning": reasoning,
+            "key_skills_match": matched,
+            "missing_skills": missing
         }
         candidate_data["status"] = "success"
     return candidate_data
@@ -171,15 +208,17 @@ def screen_resume(
     results = []
     
     for file in files:
-        if not file.filename.lower().endswith(('.pdf', '.docx', '.doc')):
-            results.append({"file": file.filename, "error": "Unsupported format.", "status": "failed"})
+        # Strip folder path from filename (folder upload sends paths like 'resume/file.pdf')
+        safe_filename = os.path.basename(file.filename)
+        if not safe_filename.lower().endswith(('.pdf', '.docx', '.doc')):
+            results.append({"file": safe_filename, "error": "Unsupported format.", "status": "failed"})
             continue
             
-        file_location = f"{UPLOAD_DIR}/{file.filename}"
+        file_location = f"{UPLOAD_DIR}/{safe_filename}"
         with open(file_location, "wb+") as file_object:
             shutil.copyfileobj(file.file, file_object)
         
-        saved_files.append((file_location, file.filename))
+        saved_files.append((file_location, safe_filename))
 
     # 2. Stage 1: Parallel Text Extraction
     print(f"[Stage 1] Extracting text and matching keywords for {len(saved_files)} resumes...")
@@ -247,7 +286,7 @@ def screen_resume(
             print(f" -> Bypassed LLM: {cand_name} | Using Keyword Score: {cand['keyword_score']}%")
             
             cand["score"] = cand["keyword_score"]
-            cand["reasoning"] = f"Keyword Score: {cand['keyword_score']}%. Bypassed deep AI evaluation to optimize processing speed."
+            cand["reasoning"] = _build_professional_summary(cand_name, cand['keyword_score'], cand['matched_skills'], cand['missing_skills'], jd_title)
             cand["analysis"] = {
                 "score": cand["keyword_score"],
                 "extracted_role": jd_title,
@@ -296,6 +335,7 @@ def screen_resume(
             candidate = models.Candidate(
                 name=info.get('name', 'Unknown'),
                 email=email,
+                phone=info.get('phone') or info.get('mobile') or info.get('contact'),
                 role=target_role,
                 status=models.CandidateStatus.Applied,
                 stage=models.CandidateStage.Resume_Screening,
@@ -322,6 +362,9 @@ def screen_resume(
             candidate.score = score
             candidate.analysis_data = data["analysis"]
             candidate.full_text = data["full_text"]
+            phone = info.get('phone') or info.get('mobile') or info.get('contact')
+            if phone:
+                candidate.phone = phone
             candidate.status = models.CandidateStatus.Applied
             candidate.stage = models.CandidateStage.Resume_Screening
             candidate.created_by = current_user.id
@@ -732,3 +775,33 @@ def rescreen_unscored_candidates(
         "results": results
     }
 
+
+
+# Extract Text from JD File
+@router.post("/extract-text/")
+async def extract_text_from_file(
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(get_current_user)
+):
+    import tempfile
+    suffix = os.path.splitext(file.filename)[1].lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+    try:
+        if suffix == ".txt":
+            with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        elif suffix == ".pdf":
+            text = RAGService.extract_text_from_pdf(tmp_path)
+        elif suffix in [".doc", ".docx"]:
+            text = RAGService.extract_text_from_docx(tmp_path)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type.")
+        return {"text": text.strip(), "filename": file.filename}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+    finally:
+        os.unlink(tmp_path)

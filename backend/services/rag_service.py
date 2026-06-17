@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from . import groq_client
+from . import gemini_client
 
 load_dotenv()
 
@@ -24,10 +24,55 @@ class RAGService:
         return text
 
     @staticmethod
+    def extract_text_from_docx(file_path):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        try:
+            with zipfile.ZipFile(file_path) as z:
+                xml_content = z.read('word/document.xml')
+                root = ET.fromstring(xml_content)
+                texts = []
+                for paragraph in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
+                    p_text = []
+                    for text in paragraph.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
+                        if text.text:
+                            p_text.append(text.text)
+                    if p_text:
+                        texts.append("".join(p_text))
+                return "\n".join(texts)
+        except Exception as e:
+            print(f"Error reading docx {file_path}: {e}")
+            return ""
+
+    @staticmethod
+    def _clean_phone(raw_phone):
+        """Clean and validate phone number to exactly 10 digits (Indian mobile)."""
+        if not raw_phone:
+            return None
+        digits = re.sub(r'\D', '', raw_phone)
+        # Remove common country codes: +91, 91, 0, 1
+        if len(digits) == 12 and digits.startswith('91'):
+            digits = digits[2:]
+        elif len(digits) == 11 and digits.startswith('0'):
+            digits = digits[1:]
+        elif len(digits) == 11 and digits.startswith('1'):
+            digits = digits[1:]
+        elif len(digits) > 10:
+            digits = digits[-10:]  # Take last 10 digits
+        # Validate: must be exactly 10 digits and start with 6-9 (Indian mobile)
+        if len(digits) == 10 and digits[0] in '6789':
+            return digits
+        # Fallback: if 10 digits but doesn't start with 6-9, still return
+        if len(digits) == 10:
+            return digits
+        return None
+
+    @staticmethod
     def extract_candidate_info(text, filename=""):
         info = {
             "name": "Unknown Candidate",
-            "email": None
+            "email": None,
+            "phone": None
         }
 
         # 1. Regex Email
@@ -35,6 +80,23 @@ class RAGService:
         email_match = re.search(email_pattern, text)
         if email_match:
             info["email"] = email_match.group(0)
+
+        # 1b. Regex Phone (Indian mobile + international formats)
+        phone_patterns = [
+            r'(?:\+91[\s.-]?)?[6-9]\d{4}[\s.-]?\d{5}',           # +91 9876543210
+            r'(?:0|91)?[\s.-]?[6-9]\d{4}[\s.-]?\d{5}',           # 091 98765 43210
+            r'(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}', # US format fallback
+            r'(?:\+?\d[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?\d{4,7}',  # General
+        ]
+        for pattern in phone_patterns:
+            phone_matches = re.findall(pattern, text[:3000])
+            for pm in phone_matches:
+                cleaned = RAGService._clean_phone(pm)
+                if cleaned:
+                    info["phone"] = cleaned
+                    break
+            if info["phone"]:
+                break
 
         # 2. Heuristic Name
         lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -48,7 +110,7 @@ class RAGService:
                 break
 
         # 3. AI Fallback
-        if not info["email"] or info["name"] == "Unknown Candidate":
+        if not info["email"] or info["name"] == "Unknown Candidate" or not info["phone"]:
             try:
                 header_text = text[:3000]
                 ai_extracted = RAGService.extract_with_llm(header_text)
@@ -56,6 +118,11 @@ class RAGService:
                     info["name"] = ai_extracted["name"]
                 if ai_extracted.get("email") and not info["email"]:
                     info["email"] = ai_extracted["email"]
+                if ai_extracted.get("phone") and not info["phone"]:
+                    # Clean AI-extracted phone too
+                    cleaned_ai_phone = RAGService._clean_phone(ai_extracted["phone"])
+                    if cleaned_ai_phone:
+                        info["phone"] = cleaned_ai_phone
             except Exception as e:
                 print(f"Candidate info extraction failed: {e}")
 
@@ -72,59 +139,46 @@ class RAGService:
     @staticmethod
     def extract_with_llm(text_chunk):
         """
-        Uses Groq to parse structured contact info from raw text.
+        Uses Gemini 2.5 Flash to parse structured contact info from raw text.
         """
-        if not groq_client.has_groq_key():
+        if not gemini_client.has_gemini_key():
             return {}
 
         try:
             return RAGService._inner_extract_with_llm(text_chunk)
         except Exception as e:
-            print(f"Groq extraction failed after retries: {e}")
+            print(f"Gemini extraction failed after retries: {e}")
             return {}
 
     @staticmethod
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=10),
-        retry=retry_if_exception_type(requests.exceptions.HTTPError)
+        retry=retry_if_exception_type(Exception)
     )
     def _inner_extract_with_llm(text_chunk):
         prompt = f"""
-        Extract the **Candidate Name** and **Email Address** from the text below.
-        If email is not found, return null.
-        If name is not found, return null.
+        Extract the **Candidate Name**, **Email Address**, and **Phone Number** from the text below.
+        Return null for any field not found.
         
         TEXT:
         {text_chunk}
         
         OUTPUT JSON ONLY:
         {{
-            "name": "Full Name",
-            "email": "email"
+            "name": "Full Name or null",
+            "email": "email or null",
+            "phone": "phone number or null"
         }}
         """
         
-        url = "https://api.groq.com/openai/v1/chat/completions" 
-        payload = {
-            "messages": [
-                {"role": "system", "content": "You are a data extraction assistant. Output valid JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            "model": "llama-3.1-8b-instant",
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }
-        
-        # DEBUG
-        response = groq_client.execute_groq_request(url, payload, timeout=15)
-        response.raise_for_status()
-        
-        if response.status_code == 200:
-            content = response.json()['choices'][0]['message']['content']
-            return json.loads(content)
-        
-        return {}
+        result = gemini_client.call_gemini(
+            prompt=prompt,
+            system_prompt="You are a data extraction assistant. Output valid JSON only.",
+            temperature=0.1,
+            json_mode=True
+        )
+        return result
 
     @staticmethod
     def screen_resume(jd_text, resume_id, resume_context=""):
@@ -141,10 +195,10 @@ class RAGService:
                 "missing_skills": []
             }
 
-        # 3. Call Groq API with context
-        if not groq_client.has_groq_key():
+        # 3. Call Gemini API with context
+        if not gemini_client.has_gemini_key():
             return {"score": 0, "reasoning": "Missing API Key", "key_skills_match": [], "missing_skills": []}
-        return RAGService.call_groq_api(jd_text, resume_context)
+        return RAGService.call_gemini_api(jd_text, resume_context)
 
     @staticmethod
     @retry(
@@ -152,13 +206,12 @@ class RAGService:
         wait=wait_exponential(multiplier=2, min=2, max=10),
         retry=retry_if_exception_type(requests.exceptions.HTTPError)
     )
-    def call_groq_api(jd, resume_context):
+    def call_gemini_api(jd, resume_context):
         # Fetch dynamic scoring weights from database
         try:
             from database import SessionLocal
             import models
             db = SessionLocal()
-            # Get the most recent settings (works for single or multi-admin)
             settings_obj = db.query(models.GlobalSettings).order_by(models.GlobalSettings.id.desc()).first()
             weights = settings_obj.config.get("scoring", {
                 "skills": 40,
@@ -228,30 +281,14 @@ class RAGService:
         """
         
         try:
-            url = "https://api.groq.com/openai/v1/chat/completions" 
-            payload = {
-                "messages": [
-                    {"role": "system", "content": "You are a helpful and accurate recruitment assistant. You only output valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "model": "llama-3.1-8b-instant",
-                "temperature": 0.1,
-                "response_format": {"type": "json_object"}
-            }
-            
-            response = groq_client.execute_groq_request(url, payload)
-            response.raise_for_status() 
-            
-            data = response.json()
-            content = data['choices'][0]['message']['content']
-            
-            try:
-                return json.loads(content)
-            except json.JSONDecodeError:
-                content = content.replace("```json", "").replace("```", "").strip()
-                return json.loads(content)
+            result = gemini_client.call_gemini(
+                prompt=prompt,
+                system_prompt="You are a helpful and accurate recruitment assistant. You only output valid JSON.",
+                temperature=0.1,
+                json_mode=True
+            )
+            return result
             
         except Exception as e:
-            print(f"Groq API Error: {e}")
-            # Re-raise so the caller can fall back to keyword matching
+            print(f"Gemini API Error: {e}")
             raise

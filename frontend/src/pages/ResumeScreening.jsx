@@ -1,9 +1,9 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
     Upload, FileText, Brain, Loader2, CheckCircle, AlertCircle,
     Filter, ChevronRight, X, Sparkles, ChevronDown, ChevronUp,
-    Search, Play, Minus, ArrowRight
+    Search, Play, Minus, ArrowRight, FolderOpen, FilePlus, Cloud, HardDrive
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import API_URL from '../apiConfig';
@@ -171,6 +171,9 @@ const CandidateResultCard = ({ candidate, rank }) => {
 const ResumeScreening = () => {
     const [jobDescription, setJobDescription] = useState('');
     const [files, setFiles] = useState([]);
+    const folderInputRef = useRef(null);
+    const jdFileInputRef = useRef(null);
+    const [showFolderMenu, setShowFolderMenu] = useState(false);
 
     // Screening Settings
     const [shortlistCount, setShortlistCount] = useState(5);
@@ -186,6 +189,42 @@ const ResumeScreening = () => {
     const [promoteSuccess, setPromoteSuccess] = useState(false);
 
     // Validation
+    const handleFolderUpload = (e) => {
+        const folderFiles = Array.from(e.target.files).filter(f =>
+            f.name.endsWith('.pdf') || f.name.endsWith('.doc') || f.name.endsWith('.docx')
+        );
+        setFiles(prev => {
+            const existing = new Set(prev.map(f => f.name));
+            return [...prev, ...folderFiles.filter(f => !existing.has(f.name))];
+        });
+        e.target.value = '';
+    };
+
+    const handleJDFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        // For plain text / txt files, read directly
+        if (file.type === 'text/plain') {
+            const reader = new FileReader();
+            reader.onload = (ev) => setJobDescription(ev.target.result);
+            reader.readAsText(file);
+        } else {
+            // For PDF/DOC, send to backend to extract text
+            const formData = new FormData();
+            formData.append('file', file);
+            const token = localStorage.getItem('token');
+            fetch(`${API_URL}/api/resume/extract-text/`, {
+                method: 'POST',
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+                body: formData
+            })
+            .then(r => r.json())
+            .then(d => { if (d.text) setJobDescription(d.text); })
+            .catch(() => alert('Could not extract text from file. Please paste the JD manually.'));
+        }
+        e.target.value = '';
+    };
+
     const handlePromoteToNextStage = async () => {
         if (!results.length) return;
         setIsPromoting(true);
@@ -298,56 +337,143 @@ const ResumeScreening = () => {
                 {/* LEFT COLUMN: Inputs & Upload (Sticky & Scrollable) */}
                 <div className="lg:col-span-4 space-y-4 flex flex-col h-full overflow-hidden">
                     {/* JD Input */}
-                    <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex-shrink-0">
-                        <div className="flex justify-between items-center mb-2">
-                            <h3 className="font-semibold text-[#5d8c2c] flex items-center gap-2 text-sm">
-                                <FileText size={16} className="text-green-600" /> Job Description
+                    <div className="bg-white border border-gray-200/80 rounded-2xl p-5 shadow-sm flex-shrink-0 hover:shadow-md transition-shadow duration-300">
+                        <div className="flex justify-between items-center mb-3">
+                            <h3 className="font-bold text-[#5d8c2c] flex items-center gap-2 text-sm tracking-tight">
+                                <div className="w-7 h-7 bg-green-100 rounded-lg flex items-center justify-center">
+                                    <FileText size={14} className="text-[#5d8c2c]" />
+                                </div>
+                                Job Description
                             </h3>
-                            <button onClick={() => setJobDescription('')} className="text-xs text-green-600 hover:underline">Clear</button>
+                            <div className="flex items-center gap-2">
+                                {/* JD File Upload */}
+                                <button
+                                    onClick={() => jdFileInputRef.current?.click()}
+                                    title="Upload JD from file (PDF, DOC, TXT)"
+                                    className="text-xs font-semibold text-white flex items-center gap-1.5 bg-gradient-to-r from-[#5d8c2c] to-[#4a7a1f] px-3 py-1.5 rounded-lg hover:shadow-md hover:shadow-green-200/50 hover:-translate-y-0.5 transition-all duration-200"
+                                >
+                                    <FilePlus size={12} /> Upload File
+                                </button>
+                                <input
+                                    ref={jdFileInputRef}
+                                    type="file"
+                                    accept=".pdf,.doc,.docx,.txt"
+                                    onChange={handleJDFileUpload}
+                                    className="hidden"
+                                />
+                                <button onClick={() => setJobDescription('')} className="text-xs text-gray-400 hover:text-red-500 font-medium transition-colors">Clear</button>
+                            </div>
                         </div>
                         <textarea
                             value={jobDescription}
                             onChange={(e) => setJobDescription(e.target.value)}
-                            placeholder={`Paste job description...`}
-                            className="w-full h-32 bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-none transition-all"
+                            placeholder={`Paste or type job description here...`}
+                            className="w-full h-32 bg-gray-50/80 border border-gray-200 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#5d8c2c]/30 focus:border-[#5d8c2c]/50 resize-none transition-all placeholder:text-gray-400"
                         />
                     </div>
 
                     {/* Upload Zone */}
-                    <div className="bg-white border rounded-xl p-4 shadow-sm flex flex-col flex-1 min-h-0">
-                        <h3 className="font-semibold text-[#5d8c2c] mb-2 flex items-center gap-2 text-sm">
-                            <Upload size={16} className="text-green-600" /> Upload Resumes
-                        </h3>
+                    <div className="bg-white border border-gray-200/80 rounded-2xl p-5 shadow-sm flex flex-col flex-1 min-h-0 hover:shadow-md transition-shadow duration-300">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="font-bold text-[#5d8c2c] flex items-center gap-2 text-sm tracking-tight">
+                                <div className="w-7 h-7 bg-green-100 rounded-lg flex items-center justify-center">
+                                    <Upload size={14} className="text-[#5d8c2c]" />
+                                </div>
+                                Upload Resumes
+                            </h3>
+                            {/* Folder Upload Button with Dropdown */}
+                            <div className="relative">
+                                <button
+                                    onClick={() => setShowFolderMenu(v => !v)}
+                                    title="Upload entire folder of resumes"
+                                    className="text-xs font-semibold text-white flex items-center gap-1.5 bg-gradient-to-r from-[#5d8c2c] to-[#4a7a1f] px-3 py-1.5 rounded-lg hover:shadow-md hover:shadow-green-200/50 hover:-translate-y-0.5 transition-all duration-200"
+                                >
+                                    <FolderOpen size={12} /> Folder Upload <ChevronDown size={10} />
+                                </button>
+
+                                {/* Dropdown Menu */}
+                                {showFolderMenu && (
+                                    <>
+                                        {/* Backdrop to close menu */}
+                                        <div className="fixed inset-0 z-40" onClick={() => setShowFolderMenu(false)} />
+                                        <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-xl shadow-xl border border-gray-200 z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-200">
+                                            <div className="p-1.5 space-y-0.5">
+                                                <button
+                                                    onClick={() => {
+                                                        setShowFolderMenu(false);
+                                                        alert('OneDrive integration coming soon! Please use local folder upload for now.');
+                                                    }}
+                                                    className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                                                >
+                                                    <Cloud size={16} className="text-blue-500" />
+                                                    OneDrive
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setShowFolderMenu(false);
+                                                        folderInputRef.current?.click();
+                                                    }}
+                                                    className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-green-50 hover:text-green-700 transition-colors"
+                                                >
+                                                    <HardDrive size={16} className="text-green-600" />
+                                                    From Local
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                            {/* Hidden folder input */}
+                            <input
+                                ref={folderInputRef}
+                                type="file"
+                                webkitdirectory="true"
+                                multiple
+                                accept=".pdf,.doc,.docx"
+                                onChange={handleFolderUpload}
+                                className="hidden"
+                            />
+                        </div>
 
                         <div
                             {...getRootProps()}
-                            className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center cursor-pointer transition-all flex-shrink-0 ${isDragActive ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-green-400 hover:bg-gray-50'}`}
+                            className={`border-2 border-dashed rounded-xl flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-300 group ${files.length > 0 ? 'p-3' : 'p-8'} ${isDragActive ? 'border-[#5d8c2c] bg-green-50/80 scale-[1.01]' : 'border-gray-300 hover:border-[#5d8c2c]/60 hover:bg-green-50/30'}`}
                         >
                             <input {...getInputProps()} />
-                            <div className="w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-2">
-                                <Upload size={16} />
-                            </div>
-                            <p className="text-xs font-semibold text-gray-700">Click or drag files</p>
+                            {files.length === 0 ? (
+                                <>
+                                    <div className="w-12 h-12 bg-gradient-to-br from-green-100 to-green-50 text-[#5d8c2c] rounded-xl flex items-center justify-center mb-3 group-hover:scale-110 group-hover:shadow-md group-hover:shadow-green-100 transition-all duration-300">
+                                        <Upload size={20} />
+                                    </div>
+                                    <p className="text-sm font-semibold text-gray-700">Click or drag files here</p>
+                                    <p className="text-xs text-gray-400 mt-1">Supports PDF, DOC, DOCX</p>
+                                </>
+                            ) : (
+                                <div className="flex items-center gap-2 text-xs text-gray-500 font-medium">
+                                    <Upload size={14} className="text-[#5d8c2c]" />
+                                    <span>Click or drag to add more files</span>
+                                </div>
+                            )}
                         </div>
 
                         {/* File Queue - Internal Scroll */}
                         {files.length > 0 && (
-                            <div className="mt-4 flex-1 min-h-0 flex flex-col">
+                            <div className="mt-3 flex-1 min-h-0 flex flex-col">
                                 <div className="flex justify-between text-xs text-gray-500 font-medium mb-2">
                                     <span>{files.length} files queued</span>
                                     <button onClick={() => setFiles([])} className="text-red-500 hover:underline">Remove All</button>
                                 </div>
-                                <div className="overflow-y-auto custom-scrollbar flex-1 space-y-1 pr-1">
+                                <div className="overflow-y-auto custom-scrollbar flex-1 min-h-[120px] space-y-1.5 pr-1">
                                     {files.map((file, idx) => (
-                                        <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded-lg text-xs border border-gray-100">
+                                        <div key={idx} className="flex items-center justify-between p-2.5 bg-gray-50 rounded-lg text-xs border border-gray-100">
                                             <div className="flex items-center gap-2 overflow-hidden">
-                                                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${results.length > idx ? 'bg-green-500' : idx === currentFileIndex ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
-                                                <span className="truncate max-w-[150px]">{file.name}</span>
+                                                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${results.length > idx ? 'bg-green-500' : idx === currentFileIndex ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
+                                                <span className="truncate max-w-[180px] font-medium text-gray-700">{file.name}</span>
                                             </div>
-                                            {isScreening && idx === currentFileIndex && <Loader2 size={10} className="animate-spin text-green-600" />}
+                                            {isScreening && idx === currentFileIndex && <Loader2 size={12} className="animate-spin text-green-600" />}
                                             {!isScreening && (
-                                                <button onClick={() => setFiles(files.filter(f => f !== file))} className="text-gray-400 hover:text-red-500">
-                                                    <X size={12} />
+                                                <button onClick={() => setFiles(files.filter(f => f !== file))} className="text-gray-400 hover:text-red-500 p-0.5">
+                                                    <X size={14} />
                                                 </button>
                                             )}
                                         </div>
@@ -362,45 +488,27 @@ const ResumeScreening = () => {
                 <div className="lg:col-span-8 flex flex-col h-full overflow-hidden">
 
                     {/* Header with Actions (Sticky) */}
-                    <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4 transition-all duration-500">
-                        <div className="flex items-center gap-3">
-                            <h2 className="text-lg font-semibold text-[#5d8c2c] flex items-center gap-2">
+                    <div className="bg-white border border-gray-200/80 rounded-2xl p-4 mb-4 shadow-sm transition-all duration-300 hover:shadow-md">
+                        {/* Row 1: Title + Process to Next Stage */}
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                            <h2 className="text-lg font-bold text-[#5d8c2c] flex items-center gap-2 tracking-tight">
+                                <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
+                                    <Sparkles size={16} className="text-[#5d8c2c]" />
+                                </div>
                                 Screening Results
                                 {(processedCount > 0 || results.length > 0) && (
-                                    <span className="text-xs font-normal text-gray-500 px-2 py-0.5 bg-gray-100 rounded-full border border-gray-200">
+                                    <span className="text-xs font-semibold text-[#5d8c2c] px-2.5 py-0.5 bg-green-50 rounded-full border border-green-200">
                                         Top {results.length} / {processedCount}
                                     </span>
                                 )}
                             </h2>
+
                         </div>
 
-                        {/* Top-Right Action Group */}
-                        <div className="flex items-center gap-3 flex-wrap justify-end">
-                            {/* Process to Next Stage button — shown after screening */}
-                            {results.length > 0 && !isScreening && (
-                                <button
-                                    onClick={handlePromoteToNextStage}
-                                    disabled={isPromoting || promoteSuccess}
-                                    className={`px-5 py-2 rounded-lg font-semibold text-sm flex items-center gap-2 transition-all shadow-md whitespace-nowrap ${
-                                        promoteSuccess
-                                            ? 'bg-green-100 text-green-700 border border-green-300 cursor-default'
-                                            : isPromoting
-                                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                                            : 'bg-white border border-green-600 text-green-700 hover:bg-green-50 hover:shadow-lg'
-                                    }`}
-                                >
-                                    {promoteSuccess ? (
-                                        <><CheckCircle size={16} /> Promoted to Next Stage</>
-                                    ) : isPromoting ? (
-                                        <><Loader2 size={16} className="animate-spin" /> Promoting...</>
-                                    ) : (
-                                        <><ArrowRight size={16} /> Process to Next Stage</>
-                                    )}
-                                </button>
-                            )}
-
+                        {/* Row 2: Top-N input + Start Screening button */}
+                        <div className="flex items-center justify-end gap-3">
                             {/* Shortlist Setting */}
-                            <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200" title="Top candidates to return">
+                            <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200" title="Top candidates to return">
                                 <span className="text-xs font-bold text-gray-500">Top:</span>
                                 <input
                                     type="number"
