@@ -1,8 +1,6 @@
 import os
 import base64
 import io
-import numpy as np
-from PIL import Image
 from pathlib import Path
 
 
@@ -66,6 +64,9 @@ def analyze_frame(image_base64: str) -> dict:
         return {"violations": [], "detections": [], "person_count": -1, "error": "Model not loaded"}
 
     try:
+        from PIL import Image
+        import numpy as np
+
         # Decode base64 image
         if ',' in image_base64:
             image_base64 = image_base64.split(',')[1]

@@ -42,7 +42,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 
 def send_email(to_email: str, subject: str, html_content: str):
     # Fetch latest credentials from environment
-    load_dotenv(override=True)
+    load_dotenv(override=False)
     host = os.getenv("EMAIL_HOST", "smtp.gmail.com")
     port = int(os.getenv("EMAIL_PORT", 587))
     user = os.getenv("EMAIL_HOST_USER")

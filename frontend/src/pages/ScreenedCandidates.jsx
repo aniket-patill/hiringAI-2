@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import API_URL from '../apiConfig';
-import { BarChart2, Download, FileText, FileSpreadsheet, Loader2, Eye, X, Search } from 'lucide-react';
+import { BarChart2, Download, FileText, FileSpreadsheet, Loader2, Eye, X, Search, Trash2 } from 'lucide-react';
 
 // ─── Utility: Clean phone numbers ────────────────────────────────────────────
 const cleanPhone = (phone) => {
@@ -250,6 +250,53 @@ const ScreenedCandidates = () => {
     const [showExportMenu, setShowExportMenu] = useState(false);
     const [analysisCandidate, setAnalysisCandidate] = useState(null);
     const [resumeCandidate, setResumeCandidate] = useState(null);
+    const [resetting, setResetting] = useState(false);
+
+    const handleReset = async () => {
+        if (!window.confirm("Are you sure you want to delete all screened candidates and reset the screening history? This will also clear the AI search index for these candidates. This action cannot be undone.")) {
+            return;
+        }
+        setResetting(true);
+        try {
+            const response = await fetch(`${API_URL}/api/resume/reset-screened/`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
+            if (response.ok) {
+                setCandidates([]);
+                alert("Screened candidates list has been reset successfully.");
+            } else {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.detail || `Server returned ${response.status}`);
+            }
+        } catch (err) {
+            console.error('Failed to reset candidates', err);
+            alert(`Error resetting candidates: ${err.message}`);
+        } finally {
+            setResetting(false);
+        }
+    };
+
+    const handleDeleteIndividual = async (id) => {
+        if (!window.confirm("Are you sure you want to delete this candidate? This action cannot be undone.")) {
+            return;
+        }
+        try {
+            const response = await fetch(`${API_URL}/api/resume/candidates/${id}/`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
+            if (response.ok) {
+                setCandidates(prev => prev.filter(c => c.id !== id));
+            } else {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.detail || `Server returned ${response.status}`);
+            }
+        } catch (err) {
+            console.error('Failed to delete candidate', err);
+            alert(`Error deleting candidate: ${err.message}`);
+        }
+    };
 
     const fetchCandidates = async () => {
         setLoading(true);
@@ -322,42 +369,58 @@ const ScreenedCandidates = () => {
                             </div>
 
                             {candidates.length > 0 && (
-                                <div id="export-menu-container" className="relative">
+                                <div className="flex items-center gap-3">
                                     <button
-                                        onClick={() => setShowExportMenu(v => !v)}
-                                        className="flex items-center gap-2 px-5 py-2.5 bg-[#5d8c2c] text-white rounded-xl font-semibold text-sm hover:bg-[#4a7023] transition-all shadow-md hover:shadow-lg"
+                                        onClick={handleReset}
+                                        disabled={resetting}
+                                        className="flex items-center gap-2 px-4 py-2.5 bg-red-50 text-red-600 border border-red-200 rounded-xl font-semibold text-sm hover:bg-red-100 hover:text-red-700 disabled:opacity-55 transition-all shadow-sm"
+                                        title="Delete all screened candidates and clear history"
                                     >
-                                        <Download size={16} />
-                                        Export Data
+                                        {resetting ? (
+                                            <Loader2 size={16} className="animate-spin text-red-600" />
+                                        ) : (
+                                            <Trash2 size={16} />
+                                        )}
+                                        Reset Candidates
                                     </button>
 
-                                    {showExportMenu && (
-                                        <div className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-gray-100 z-50 overflow-hidden">
-                                            <div className="p-2 space-y-1">
-                                                <button
-                                                    onClick={() => { exportToPDF(candidates); setShowExportMenu(false); }}
-                                                    className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors"
-                                                >
-                                                    <FileText size={16} className="text-red-500" />
-                                                    Export as PDF
-                                                </button>
-                                                <button
-                                                    onClick={() => { exportToExcel(candidates); setShowExportMenu(false); }}
-                                                    className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-green-50 hover:text-green-700 transition-colors"
-                                                >
-                                                    <FileSpreadsheet size={16} className="text-green-600" />
-                                                    Export as Excel
-                                                </button>
-                                                <button
-                                                    onClick={() => { exportToWord(candidates); setShowExportMenu(false); }}
-                                                    className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
-                                                >
-                                                    <FileText size={16} className="text-blue-500" />
-                                                    Export as Word
-                                                </button>
+                                    <div id="export-menu-container" className="relative">
+                                        <button
+                                            onClick={() => setShowExportMenu(v => !v)}
+                                            className="flex items-center gap-2 px-5 py-2.5 bg-[#5d8c2c] text-white rounded-xl font-semibold text-sm hover:bg-[#4a7023] transition-all shadow-md hover:shadow-lg"
+                                        >
+                                            <Download size={16} />
+                                            Export Data
+                                        </button>
+
+                                        {showExportMenu && (
+                                            <div className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-gray-100 z-50 overflow-hidden">
+                                                <div className="p-2 space-y-1">
+                                                    <button
+                                                        onClick={() => { exportToPDF(candidates); setShowExportMenu(false); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors"
+                                                    >
+                                                        <FileText size={16} className="text-red-500" />
+                                                        Export as PDF
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { exportToExcel(candidates); setShowExportMenu(false); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-green-50 hover:text-green-700 transition-colors"
+                                                    >
+                                                        <FileSpreadsheet size={16} className="text-green-600" />
+                                                        Export as Excel
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { exportToWord(candidates); setShowExportMenu(false); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                                                    >
+                                                        <FileText size={16} className="text-blue-500" />
+                                                        Export as Word
+                                                    </button>
+                                                </div>
                                             </div>
-                                        </div>
-                                    )}
+                                        )}
+                                    </div>
                                 </div>
                             )}
                         </div>
@@ -396,7 +459,7 @@ const ScreenedCandidates = () => {
                                         <th className="px-4 py-4 text-left font-semibold text-gray-500 uppercase tracking-wide text-xs">Email</th>
                                         <th className="px-4 py-4 text-left font-semibold text-gray-500 uppercase tracking-wide text-xs w-24">Score</th>
                                         <th className="px-4 py-4 text-center font-semibold text-gray-500 uppercase tracking-wide text-xs w-24">Analysis</th>
-                                        <th className="px-4 py-4 text-center font-semibold text-gray-500 uppercase tracking-wide text-xs w-28">Resume</th>
+                                        <th className="px-4 py-4 text-center font-semibold text-gray-500 uppercase tracking-wide text-xs w-36">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
@@ -436,14 +499,23 @@ const ScreenedCandidates = () => {
                                                     </button>
                                                 </td>
                                                 <td className="px-4 py-4 text-center">
-                                                    <button
-                                                        onClick={() => openResume(c)}
-                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-xs font-semibold hover:bg-blue-100 hover:shadow-sm transition-all border border-blue-200"
-                                                        title="View resume in browser"
-                                                    >
-                                                        <Eye size={13} />
-                                                        View
-                                                    </button>
+                                                    <div className="flex items-center justify-center gap-2">
+                                                        <button
+                                                            onClick={() => openResume(c)}
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-xs font-semibold hover:bg-blue-100 hover:shadow-sm transition-all border border-blue-200"
+                                                            title="View resume in browser"
+                                                        >
+                                                            <Eye size={13} />
+                                                            View
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDeleteIndividual(c.id)}
+                                                            className="inline-flex items-center justify-center p-1.5 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 hover:shadow-sm transition-all border border-red-200"
+                                                            title="Delete Candidate"
+                                                        >
+                                                            <Trash2 size={13} />
+                                                        </button>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         );

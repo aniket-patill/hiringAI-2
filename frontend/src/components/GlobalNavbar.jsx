@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Layout, Users, Shield, LogOut, Bell, UserCircle, FileSearch, UserCheck, SlidersHorizontal } from 'lucide-react';
+import { Layout, Users, Shield, LogOut, Bell, UserCircle, FileSearch, UserCheck, SlidersHorizontal, Sparkles } from 'lucide-react';
 import CandidateLoginModal from './CandidateLoginModal';
 import { UserButton } from '@clerk/clerk-react';
 import API_URL from '../apiConfig';
@@ -123,6 +123,7 @@ const GlobalNavbar = () => {
     const navItems = [
         { path: '/resume-screening', label: 'Resume Screening', icon: FileSearch },
         { path: '/screened-candidates', label: 'Screened Candidates', icon: UserCheck },
+        { path: '/resume-chat', label: 'AI Search', icon: Sparkles },
         { path: '/settings', label: 'Settings', icon: SlidersHorizontal },
     ];
 
