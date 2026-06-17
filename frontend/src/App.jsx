@@ -8,6 +8,7 @@ import ResumeScreening from './pages/ResumeScreening';
 // import RecruitmentRoundsManager from './pages/RecruitmentRoundsManager'; // COMMENTED OUT
 // import Candidates from './pages/Candidates';             // COMMENTED OUT
 import ScreenedCandidates from './pages/ScreenedCandidates';
+import ResumeChat from './pages/ResumeChat';
 // import Analytics from './pages/Analytics';               // COMMENTED OUT
 import AuthLayout from './layouts/AuthLayout';
 import DashboardLayout from './layouts/DashboardLayout';
@@ -47,6 +48,7 @@ function App() {
                         {/* COMMENTED OUT: <Route path="/technical-interview" element={<TechnicalInterview />} /> */}
                         {/* COMMENTED OUT: <Route path="/candidates" element={<Candidates />} /> */}
                         {/* COMMENTED OUT: <Route path="/analytics" element={<Analytics />} /> */}
+                        <Route path="/resume-chat" element={<ResumeChat />} />
                         <Route path="/settings" element={<GlobalSettings />} />
                         {/* Default redirect to Resume Screening */}
                         <Route path="/dashboard" element={<Navigate to="/resume-screening" replace />} />

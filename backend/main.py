@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import models, database
-from routers import auth, assessments, resume, dashboard, settings, interview, proctor
+from routers import auth, assessments, resume, dashboard, settings, interview, proctor, rag
 
 app = FastAPI(title="HiringAI Enterprise API")
 
@@ -34,7 +34,7 @@ models.Base.metadata.create_all(bind=database.engine)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -47,6 +47,7 @@ app.include_router(dashboard.router)
 app.include_router(settings.router)
 app.include_router(interview.router)
 app.include_router(proctor.router)
+app.include_router(rag.router)
 
 @app.get("/")
 def read_root():

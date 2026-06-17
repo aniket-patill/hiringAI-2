@@ -11,7 +11,7 @@ def get_groq_api_keys():
     Supports primary key and multiple fallback keys.
     """
     # Force reload environment to catch real-time changes
-    load_dotenv(override=True)
+    load_dotenv(override=False)
     
     keys = []
     

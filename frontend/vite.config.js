@@ -10,5 +10,24 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    host: '0.0.0.0',
+    port: 5173,
+    proxy: {
+      // Proxy all /api/* and /media/* calls to the backend container
+      // so the browser never crosses origins → no CORS needed
+      '/api': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/media': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
+  },
 })
+
 

@@ -9,15 +9,17 @@ import { motion, AnimatePresence } from 'framer-motion';
 import API_URL from '../apiConfig';
 
 // --- Processing Overlay Component ---
-const ProcessingStatus = ({ currentFile, stage }) => {
+const ProcessingStatus = ({ batchStatus, completedCount, totalCount, filesCount }) => {
     const stages = [
-        { id: 'parsing', label: 'Parsing Resume Structure', icon: FileText },
-        { id: 'extracting', label: 'Extracting Skills & Experience', icon: Brain },
-        { id: 'matching', label: 'Matching with Job Description', icon: Search },
-        { id: 'scoring', label: 'Calculating Match Score', icon: Sparkles },
+        { id: 'queued', label: 'Uploading Resumes', icon: Upload },
+        { id: 'processing', label: 'AI Screening Active', icon: Brain },
+        { id: 'scoring', label: 'Calculating Scores', icon: Sparkles },
+        { id: 'completed', label: 'Results Ready', icon: CheckCircle },
     ];
 
-    const currentIdx = stages.findIndex(s => s.id === stage) || 0;
+    const stageMap = { queued: 0, processing: 1, scoring: 2, completed: 3 };
+    const currentIdx = stageMap[batchStatus] ?? 1;
+    const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
     return (
         <motion.div
@@ -29,7 +31,7 @@ const ProcessingStatus = ({ currentFile, stage }) => {
                 <motion.div
                     className="h-full bg-green-600"
                     initial={{ width: "0%" }}
-                    animate={{ width: `${((currentIdx + 1) / 4) * 100}%` }}
+                    animate={{ width: `${progressPct || ((currentIdx + 1) / 4) * 100}%` }}
                     transition={{ duration: 0.5 }}
                 />
             </div>
@@ -39,8 +41,12 @@ const ProcessingStatus = ({ currentFile, stage }) => {
                     <Loader2 className="animate-spin" size={24} />
                 </div>
                 <div>
-                    <h3 className="text-lg font-bold text-gray-900">Analysing: {currentFile?.name}</h3>
-                    <p className="text-sm text-gray-500">AI Intelligence Engine Active</p>
+                    <h3 className="text-lg font-bold text-gray-900">
+                        Processing {filesCount} resume{filesCount !== 1 ? 's' : ''}…
+                    </h3>
+                    <p className="text-sm text-gray-500">
+                        {completedCount} / {totalCount} completed · Worker is screening in background
+                    </p>
                 </div>
             </div>
 
@@ -180,10 +186,11 @@ const ResumeScreening = () => {
 
     // Screening State
     const [isScreening, setIsScreening] = useState(false);
-    const [currentFileIndex, setCurrentFileIndex] = useState(-1);
-    const [processingStage, setProcessingStage] = useState('idle');
+    const [batchStatus, setBatchStatus] = useState('idle'); // idle | queued | processing | completed | failed
+    const [batchCompleted, setBatchCompleted] = useState(0);
+    const [batchTotal, setBatchTotal] = useState(0);
+    const pollTimerRef = useRef(null);
 
-    const [processedCount, setProcessedCount] = useState(0);
     const [results, setResults] = useState([]);
     const [isPromoting, setIsPromoting] = useState(false);
     const [promoteSuccess, setPromoteSuccess] = useState(false);
@@ -262,16 +269,26 @@ const ResumeScreening = () => {
         accept: { 'application/pdf': ['.pdf'], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] }
     });
 
+    // Clean up polling on unmount
+    useEffect(() => {
+        return () => {
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+        };
+    }, []);
+
     const startScreening = async () => {
         if (!isValidToStart) return;
 
+        // Clear old polling
+        if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
         setIsScreening(true);
         setResults([]);
-        setProcessedCount(0);
-        setCurrentFileIndex(0);
+        setBatchStatus('queued');
+        setBatchCompleted(0);
+        setBatchTotal(files.length);
+        setPromoteSuccess(false);
 
-        setProcessingStage('parsing');
-        
         const formData = new FormData();
         formData.append('job_description', jobDescription);
         formData.append('top_n', shortlistCount);
@@ -281,7 +298,8 @@ const ResumeScreening = () => {
 
         try {
             const token = localStorage.getItem('token');
-            setProcessingStage('extracting');
+
+            // Step 1: Submit the batch — backend enqueues to Redis, returns batch_id
             const response = await fetch(`${API_URL}/api/resume/screen/`, {
                 method: 'POST',
                 headers: {
@@ -290,36 +308,93 @@ const ResumeScreening = () => {
                 body: formData
             });
 
-            if (response.ok) {
-                setProcessingStage('scoring');
-                const data = await response.json();
-
-                if (data.results && data.results.length > 0) {
-                    const mappedResults = data.results.map((res, i) => ({
-                        id: `res-${Date.now()}-${i}`,
-                        name: res.candidate?.name || res.file || `Candidate ${i + 1}`,
-                        score: res.score || 0,
-                        status: res.error ? 'Failed' : 'Screened',
-                        analysis: res.analysis || {},
-                        reasoning: res.reasoning || "Analysis complete.",
-                        error: res.error
-                    }));
-
-                    mappedResults.sort((a, b) => b.score - a.score);
-                    setResults(mappedResults);
-                    setPromoteSuccess(false);
-                    setProcessedCount(files.length);
-                }
-            } else {
-                console.error("Failed to screen batch of resumes");
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${response.status}`);
             }
-        } catch (err) {
-            console.error("Network error during batch screening", err);
-        }
 
-        setIsScreening(false);
-        setProcessingStage('idle');
-        setCurrentFileIndex(-1);
+            const data = await response.json();
+            const batchId = data.batch_id;
+
+            if (!batchId) {
+                throw new Error('No batch_id returned from server.');
+            }
+
+            setBatchStatus('processing');
+
+            // Step 2: Poll batch status every 3 seconds
+            const pollBatch = async () => {
+                try {
+                    const pollRes = await fetch(`${API_URL}/api/resume/screen/batch/${batchId}`, {
+                        headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) }
+                    });
+                    if (!pollRes.ok) return;
+                    const pollData = await pollRes.json();
+
+                    setBatchCompleted(pollData.completed || 0);
+                    setBatchTotal(pollData.total || files.length);
+
+                    // Update stage indicator
+                    if (pollData.completed > 0) {
+                        setBatchStatus('scoring');
+                    }
+
+                    const isDone = pollData.status === 'completed';
+                    if (isDone) {
+                        clearInterval(pollTimerRef.current);
+                        pollTimerRef.current = null;
+
+                        setBatchStatus('completed');
+
+                        // Map completed job results → display cards
+                        const mappedResults = (pollData.results || [])
+                            .filter(res => res.status === 'completed' && res.candidate)
+                            .map((res, i) => ({
+                                id: `res-${Date.now()}-${i}`,
+                                name: res.candidate?.name || res.filename || `Candidate ${i + 1}`,
+                                score: res.candidate?.score || (res.analysis?.score) || 0,
+                                status: 'Screened',
+                                analysis: res.analysis || {},
+                                reasoning: res.analysis?.reasoning || 'Analysis complete.',
+                                candidate: res.candidate,
+                                error: null
+                            }));
+
+                        // Include failed jobs too
+                        const failedResults = (pollData.results || [])
+                            .filter(res => res.status === 'failed' || res.status === 'dead')
+                            .map((res, i) => ({
+                                id: `fail-${Date.now()}-${i}`,
+                                name: res.filename || `Resume ${i + 1}`,
+                                score: 0,
+                                status: 'Failed',
+                                analysis: {},
+                                reasoning: res.error || 'Processing failed.',
+                                candidate: null,
+                                error: res.error
+                            }));
+
+                        const allResults = [...mappedResults, ...failedResults]
+                            .sort((a, b) => b.score - a.score);
+
+                        setResults(allResults);
+                        setIsScreening(false);
+                        setBatchStatus('idle');
+                    }
+                } catch (err) {
+                    console.error('Polling error:', err);
+                }
+            };
+
+            // Start polling immediately then every 3s
+            pollBatch();
+            pollTimerRef.current = setInterval(pollBatch, 3000);
+
+        } catch (err) {
+            console.error('Screening error:', err);
+            setIsScreening(false);
+            setBatchStatus('idle');
+        }
     };
 
     return (
@@ -467,10 +542,10 @@ const ResumeScreening = () => {
                                     {files.map((file, idx) => (
                                         <div key={idx} className="flex items-center justify-between p-2.5 bg-gray-50 rounded-lg text-xs border border-gray-100">
                                             <div className="flex items-center gap-2 overflow-hidden">
-                                                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${results.length > idx ? 'bg-green-500' : idx === currentFileIndex ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
+                                                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${idx < batchCompleted ? 'bg-green-500' : isScreening ? 'bg-amber-400 animate-pulse' : 'bg-gray-300'}`} />
                                                 <span className="truncate max-w-[180px] font-medium text-gray-700">{file.name}</span>
                                             </div>
-                                            {isScreening && idx === currentFileIndex && <Loader2 size={12} className="animate-spin text-green-600" />}
+                                            {isScreening && <Loader2 size={12} className="animate-spin text-green-600" />}
                                             {!isScreening && (
                                                 <button onClick={() => setFiles(files.filter(f => f !== file))} className="text-gray-400 hover:text-red-500 p-0.5">
                                                     <X size={14} />
@@ -496,9 +571,9 @@ const ResumeScreening = () => {
                                     <Sparkles size={16} className="text-[#5d8c2c]" />
                                 </div>
                                 Screening Results
-                                {(processedCount > 0 || results.length > 0) && (
+                                {results.length > 0 && (
                                     <span className="text-xs font-semibold text-[#5d8c2c] px-2.5 py-0.5 bg-green-50 rounded-full border border-green-200">
-                                        Top {results.length} / {processedCount}
+                                        {results.length} result{results.length !== 1 ? 's' : ''} / {batchTotal || files.length} submitted
                                     </span>
                                 )}
                             </h2>
@@ -551,10 +626,12 @@ const ResumeScreening = () => {
                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 pb-4">
                         {/* 1. Active Processing Card */}
                         <AnimatePresence>
-                            {isScreening && currentFileIndex >= 0 && (
+                            {isScreening && (
                                 <ProcessingStatus
-                                    currentFile={files[currentFileIndex]}
-                                    stage={processingStage}
+                                    batchStatus={batchStatus}
+                                    completedCount={batchCompleted}
+                                    totalCount={batchTotal}
+                                    filesCount={files.length}
                                 />
                             )}
                         </AnimatePresence>

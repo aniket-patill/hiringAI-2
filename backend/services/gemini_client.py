@@ -9,7 +9,7 @@ load_dotenv()
 
 def get_gemini_api_key():
     """Get the Gemini API key from environment."""
-    load_dotenv(override=True)
+    load_dotenv(override=False)
     return os.getenv("GEMINI_API_KEY")
 
 def has_gemini_key() -> bool:
@@ -32,7 +32,7 @@ def call_gemini(prompt: str, system_prompt: str = "You are a helpful assistant."
     genai.configure(api_key=api_key)
     
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-05-20",
+        model_name="gemini-2.5-flash",
         system_instruction=system_prompt,
         generation_config=genai.GenerationConfig(
             temperature=temperature,
@@ -133,7 +133,7 @@ def call_groq_sdk(fn, *args, **kwargs):
                             user_msg = msg["content"]
                     
                     model = genai.GenerativeModel(
-                        model_name="gemini-2.5-flash-preview-05-20",
+                        model_name="gemini-2.5-flash",
                         system_instruction=system_msg,
                         generation_config=genai.GenerationConfig(
                             temperature=kwargs.get("temperature", 0.1),

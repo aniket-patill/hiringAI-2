@@ -13,9 +13,6 @@ router = APIRouter(
     tags=["resume"]
 )
 
-import time
-import concurrent.futures
-
 import re
 
 COMMON_SKILLS = [
@@ -47,6 +44,39 @@ def get_keyword_score(resume_text: str, jd_text: str):
     
     score = (len(matched_skills) / len(required_skills)) * 100.0
     return round(score, 1), matched_skills, missing_skills
+
+def normalize_role(raw_title: str) -> str:
+    """Normalize a raw job title string to a canonical role name."""
+    prefixes = [
+        "we are looking for a", "we are looking for an", "we are looking for",
+        "hiring for a", "hiring for an", "hiring for",
+        "seeking candidates for a", "seeking candidates for", "seeking",
+        "looking for a", "looking for"
+    ]
+    cleaned = raw_title.lower().strip()
+
+    if any(k in cleaned for k in ["full stack", "fullstack", "mern", "mean"]):
+        return "Full Stack Software Engineer"
+    if any(k in cleaned for k in ["frontend", "front end", "react", "angular", "vue"]):
+        return "Frontend Developer"
+    if any(k in cleaned for k in ["backend", "back end", "node", "django", "fastapi", "java", "spring"]):
+        return "Backend Developer"
+    if any(k in cleaned for k in ["python", "machine learning", "ai", "data scientist"]):
+        return "Python Developer"
+    if any(k in cleaned for k in ["software engineer", "developer", "sde"]):
+        return "Software Engineer"
+
+    for prefix in prefixes:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+
+    noise_phrases = ["to join our development team", "and work on building", "remote", "(remote)", "urgent hiring"]
+    for noise in noise_phrases:
+        cleaned = cleaned.replace(noise, "")
+
+    return cleaned.title().strip()
+
 
 def extract_single_resume(file_path: str, filename: str):
     try:
@@ -132,269 +162,135 @@ def run_llm_screening(candidate_data: dict, job_description: str, jd_title: str)
     return candidate_data
 
 @router.post("/screen/")
-def screen_resume(
+async def screen_resume(
     files: List[UploadFile] = File(...),
     job_description: Optional[str] = Form(None),
     top_n: Optional[int] = Form(10),
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    start_total = time.time()
-    print(f"--- START PARALLEL SCREENING: {len(files)} files (Top N: {top_n}) ---")
-    
-    # Normalization Helper
-    def normalize_role(raw_title: str) -> str:
-        # Common prefixes to strip
-        prefixes = [
-            "we are looking for a", "we are looking for an", "we are looking for",
-            "hiring for a", "hiring for an", "hiring for",
-            "seeking candidates for a", "seeking candidates for", "seeking", 
-            "looking for a", "looking for"
-        ]
-        
-        cleaned = raw_title.lower().strip()
-        
-        # 1. Strict Canonical Mapping (Based on User Rules)
-        if any(k in cleaned for k in ["full stack", "fullstack", "mern", "mean"]):
-             return "Full Stack Software Engineer"
-        if any(k in cleaned for k in ["frontend", "front end", "react", "angular", "vue"]):
-             return "Frontend Developer"
-        if any(k in cleaned for k in ["backend", "back end", "node", "django", "fastapi", "java", "spring"]):
-             return "Backend Developer"
-        if any(k in cleaned for k in ["python", "machine learning", "ai", "data scientist"]):
-             return "Python Developer"
-        if any(k in cleaned for k in ["software engineer", "developer", "sde"]):
-             return "Software Engineer"
+    import uuid as _uuid
+    import redis_queue
 
-        # 2. Fallback: Strip noise if no specific keyword match (preserve original intent but clean it)
-        for prefix in prefixes:
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix):].strip()
-                break 
-        
-        # Strip noise suffixes
-        noise_phrases = ["to join our development team", "and work on building", "remote", "(remote)", "urgent hiring"]
-        for noise in noise_phrases:
-            cleaned = cleaned.replace(noise, "")
-            
-        return cleaned.title().strip()
+    if not job_description or not job_description.strip():
+        raise HTTPException(status_code=400, detail="Job Description is required.")
 
-    # Extract Title from JD (First line)
-    jd_lines = [l.strip() for l in job_description.split('\n') if l.strip()]
-    if jd_lines:
-        raw_title = jd_lines[0][:100] # Take first line
-        jd_title = normalize_role(raw_title)
-    else:
-        jd_title = "General Candidate"
-    
     candidate_count = db.query(models.Candidate).count()
-    
     MAX_CANDIDATES = 50
     if candidate_count >= MAX_CANDIDATES:
         return {"message": f"Candidate limit ({MAX_CANDIDATES}) reached.", "status": "limit_exceeded"}
-    
     if candidate_count + len(files) > MAX_CANDIDATES:
         allowed = MAX_CANDIDATES - candidate_count
         return {"message": f"Upload exceeds limit. Allow {allowed} more.", "status": "limit_exceeded"}
 
     UPLOAD_DIR = "media/resumes"
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    
-    if not job_description or not job_description.strip():
-        raise HTTPException(status_code=400, detail="Job Description is required.")
 
-    # 1. Save all files to disk first (Fast IO)
-    saved_files = [] 
-    results = []
-    
+    batch_id = str(_uuid.uuid4())
+    created_job_ids = []
+    skipped = []
+
     for file in files:
-        # Strip folder path from filename (folder upload sends paths like 'resume/file.pdf')
         safe_filename = os.path.basename(file.filename)
         if not safe_filename.lower().endswith(('.pdf', '.docx', '.doc')):
-            results.append({"file": safe_filename, "error": "Unsupported format.", "status": "failed"})
+            skipped.append({"file": safe_filename, "error": "Unsupported format."})
             continue
-            
+
         file_location = f"{UPLOAD_DIR}/{safe_filename}"
-        with open(file_location, "wb+") as file_object:
-            shutil.copyfileobj(file.file, file_object)
-        
-        saved_files.append((file_location, safe_filename))
+        with open(file_location, "wb+") as f:
+            shutil.copyfileobj(file.file, f)
 
-    # 2. Stage 1: Parallel Text Extraction
-    print(f"[Stage 1] Extracting text and matching keywords for {len(saved_files)} resumes...")
-    extractions = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(extract_single_resume, loc, name): name 
-            for loc, name in saved_files
-        }
-        for future in concurrent.futures.as_completed(futures):
-            extractions.append(future.result())
-
-    # Calculate keyword scores and filter out failures
-    successful_extractions = []
-    for ext in extractions:
-        if ext["status"] == "failed":
-            results.append(ext)
-            continue
-        
-        email = ext["candidate_info"].get("email")
-        if not email:
-            ext["error"] = "Could not extract email."
-            ext["status"] = "failed"
-            results.append(ext)
-            continue
-            
-        keyword_score, matched_skills, missing_skills = get_keyword_score(ext["full_text"], job_description)
-        ext["keyword_score"] = keyword_score
-        ext["matched_skills"] = matched_skills
-        ext["missing_skills"] = missing_skills
-        
-        candidate_name = ext["candidate_info"].get("name", ext["file"])
-        print(f" -> Found candidate: {candidate_name} | Local Keyword Score: {keyword_score}%")
-        successful_extractions.append(ext)
-
-    # Sort by keyword score descending
-    successful_extractions.sort(key=lambda x: x["keyword_score"], reverse=True)
-
-    # Slice candidates
-    to_llm = successful_extractions[:top_n]
-    to_fallback = successful_extractions[top_n:]
-
-    # 3. Stage 2: Parallel LLM screening for top candidates
-    llm_screened = []
-    if to_llm:
-        print(f"[Stage 2] Submitting Top {len(to_llm)} candidates to Groq LLM for deep evaluation:")
-        for c in to_llm:
-            c_name = c["candidate_info"].get("name", c["file"])
-            print(f" -> Sending to LLM: {c_name} (Stage 1 Score: {c['keyword_score']}%)")
-            
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {
-                executor.submit(run_llm_screening, cand, job_description, jd_title): cand["file"]
-                for cand in to_llm
-            }
-            for future in concurrent.futures.as_completed(futures):
-                llm_screened.append(future.result())
-
-    # Build direct fallback matches for remaining candidates (no LLM call)
-    fallback_screened = []
-    if to_fallback:
-        print(f"[Stage 2 Fallback] Bypassing LLM screening for remaining {len(to_fallback)} candidates to optimize speed:")
-        for cand in to_fallback:
-            cand_name = cand["candidate_info"].get("name", cand["file"])
-            print(f" -> Bypassed LLM: {cand_name} | Using Keyword Score: {cand['keyword_score']}%")
-            
-            cand["score"] = cand["keyword_score"]
-            cand["reasoning"] = _build_professional_summary(cand_name, cand['keyword_score'], cand['matched_skills'], cand['missing_skills'], jd_title)
-            cand["analysis"] = {
-                "score": cand["keyword_score"],
-                "extracted_role": jd_title,
-                "reasoning": cand["reasoning"],
-                "key_skills_match": cand["matched_skills"],
-                "missing_skills": cand["missing_skills"]
-            }
-            cand["status"] = "success"
-            fallback_screened.append(cand)
-
-    all_processed = llm_screened + fallback_screened
-
-    # 4. Sort ALL scored results first, then only save top_n to DB
-    #    Candidates outside top_n are NOT saved — they don't appear anywhere in the pipeline
-    scored = [d for d in all_processed if d["status"] != "failed"]
-    failed = [d for d in all_processed if d["status"] == "failed"]
-
-    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
-    top_candidates = scored[:top_n]
-    rejected_candidates = scored[top_n:]  # Did not make the cut
-
-    # Remove rejected candidates from DB if they were previously added
-    for data in rejected_candidates:
-        info = data.get("candidate_info", {})
-        email = info.get("email")
-        if email:
-            existing = db.query(models.Candidate).filter(models.Candidate.email == email).first()
-            if existing:
-                db.delete(existing)
-        print(f" -> REJECTED (not in top {top_n}): {info.get('name', data.get('file', '?'))} | Score: {data.get('score', 0):.1f}%")
-    db.commit()
-
-    # DB Writes — only for top_n candidates
-    for data in top_candidates:
-        info = data["candidate_info"]
-        email = info.get('email')
-        score = data["score"]
-
-        # DB Upsert
-        candidate = db.query(models.Candidate).filter(models.Candidate.email == email).first()
-
-        # STRICT ROLE ENFORCEMENT: Always use the Normalized JD Title
-        target_role = jd_title
-
-        if not candidate:
-            candidate = models.Candidate(
-                name=info.get('name', 'Unknown'),
-                email=email,
-                phone=info.get('phone') or info.get('mobile') or info.get('contact'),
-                role=target_role,
-                status=models.CandidateStatus.Applied,
-                stage=models.CandidateStage.Resume_Screening,
-                resume_file=data["file"],
-                full_text=data["full_text"],
-                score=score,
-                analysis_data=data["analysis"],
-                created_by=current_user.id
-            )
-            db.add(candidate)
-            db.commit()
-            db.refresh(candidate)
-            log = models.ActivityLog(user_id=current_user.id, action="screened", target=candidate.name, details=f"Score: {score}/100")
-            db.add(log)
-        else:
-            # Update metadata if we found better info
-            new_name = info.get('name', 'Unknown')
-            if new_name and new_name not in ["Unknown", "Unknown Candidate", "Candidate", "Resume", "CV"]:
-                candidate.name = new_name
-                info["name"] = new_name
-            if candidate.role != target_role:
-                candidate.role = target_role
-
-            candidate.score = score
-            candidate.analysis_data = data["analysis"]
-            candidate.full_text = data["full_text"]
-            phone = info.get('phone') or info.get('mobile') or info.get('contact')
-            if phone:
-                candidate.phone = phone
-            candidate.status = models.CandidateStatus.Applied
-            candidate.stage = models.CandidateStage.Resume_Screening
-            candidate.created_by = current_user.id
-            log = models.ActivityLog(user_id=current_user.id, action="re-screened", target=candidate.name, details=f"Score: {score}/100")
-            db.add(log)
+        job = models.ScreeningJob(
+            batch_id=batch_id,
+            filename=safe_filename,
+            file_path=file_location,
+            jd_text=job_description,
+            top_n=top_n,
+            status="pending",
+            created_by=current_user.id
+        )
+        db.add(job)
         db.commit()
+        db.refresh(job)
+        created_job_ids.append(job.id)
 
-        # Structure for Frontend
-        data["candidate"] = {
-            "name": candidate.name,
-            "email": candidate.email,
-            "id": candidate.id,
-            "role": candidate.role
+    if not created_job_ids:
+        raise HTTPException(status_code=400, detail="No valid resume files uploaded.")
+
+    # Enqueue all jobs to Redis
+    client = await redis_queue.get_redis()
+    await redis_queue.ensure_group(client)
+    for job_id in created_job_ids:
+        await redis_queue.enqueue_job(client, job_id)
+    await client.aclose()
+
+    print(f"[Screen] Batch {batch_id}: {len(created_job_ids)} jobs queued")
+    return {
+        "batch_id": batch_id,
+        "job_count": len(created_job_ids),
+        "skipped": skipped,
+        "status": "queued",
+        "message": f"{len(created_job_ids)} resume(s) queued for processing."
+    }
+
+
+@router.get("/screen/batch/{batch_id}")
+def get_batch_status(
+    batch_id: str,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    jobs = db.query(models.ScreeningJob).filter(
+        models.ScreeningJob.batch_id == batch_id,
+        models.ScreeningJob.created_by == current_user.id
+    ).all()
+
+    if not jobs:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    total = len(jobs)
+    completed = sum(1 for j in jobs if j.status == "completed")
+    failed = sum(1 for j in jobs if j.status in ("failed", "dead"))
+    pending = sum(1 for j in jobs if j.status in ("pending", "processing"))
+
+    if completed + failed == total:
+        batch_status = "completed"
+    elif completed > 0 or failed > 0:
+        batch_status = "processing"
+    else:
+        batch_status = "queued"
+
+    results = []
+    for job in jobs:
+        entry = {
+            "job_id": job.id,
+            "filename": job.filename,
+            "status": job.status,
+            "error": job.error,
+            "analysis": job.result,
         }
-
-        results.append(data)
-
-    # Add failed entries for visibility (no DB write)
-    for data in failed:
-        results.append(data)
-
-    total_time = time.time() - start_total
-    print(f"--- BATCH COMPLETE in {total_time:.2f}s | Top {top_n} saved to DB ---")
+        if job.candidate_id:
+            candidate = db.query(models.Candidate).filter(
+                models.Candidate.id == job.candidate_id
+            ).first()
+            if candidate:
+                entry["candidate"] = {
+                    "id": candidate.id,
+                    "name": candidate.name,
+                    "email": candidate.email,
+                    "role": candidate.role,
+                    "score": candidate.score,
+                }
+        results.append(entry)
 
     return {
-        "message": "Screening Complete",
-        "results": results,  # Already only top_n + any failures
-        "total_screened": len(scored),
-        "top_n": top_n,
-        "status": "completed"
+        "batch_id": batch_id,
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+        "status": batch_status,
+        "results": results
     }
 
 @router.post("/candidates/", response_model=schemas.CandidateResponse)
@@ -805,3 +701,55 @@ async def extract_text_from_file(
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
     finally:
         os.unlink(tmp_path)
+
+
+@router.delete("/reset-screened/", status_code=status.HTTP_200_OK)
+def reset_screened_candidates(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Reset (delete) all candidates in the 'Resume Screening' stage for the current user.
+    Also clears associated screening jobs and deletes their Qdrant search collection.
+    """
+    try:
+        # 1. Clear candidate_id from screening jobs first to avoid foreign key constraints
+        db.query(models.ScreeningJob).filter(
+            models.ScreeningJob.created_by == current_user.id
+        ).update({models.ScreeningJob.candidate_id: None})
+        db.commit()
+
+        # 2. Delete all screening jobs created by this user
+        db.query(models.ScreeningJob).filter(
+            models.ScreeningJob.created_by == current_user.id
+        ).delete(synchronize_session=False)
+
+        # 3. Delete candidates in the "Resume Screening" stage
+        deleted_count = db.query(models.Candidate).filter(
+            models.Candidate.stage == models.CandidateStage.Resume_Screening.value,
+            models.Candidate.created_by == current_user.id
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+
+        # 4. Delete the Qdrant vector index collection for this user
+        from services.rag_service import RagIndexingService
+        RagIndexingService.delete_collection(current_user.id)
+
+        # 5. Log the reset activity
+        log = models.ActivityLog(
+            user_id=current_user.id,
+            action="reset screened candidates",
+            target="all",
+            details=f"Deleted {deleted_count} candidate(s)"
+        )
+        db.add(log)
+        db.commit()
+
+        return {"message": f"Successfully reset {deleted_count} screened candidates and cleared all history.", "deleted_count": deleted_count}
+    except Exception as e:
+        db.rollback()
+        import traceback
+        print(f"Error resetting screened candidates: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Failed to reset candidates: {str(e)}")
+

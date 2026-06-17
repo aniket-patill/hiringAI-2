@@ -1,0 +1,157 @@
+version: "3.9"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: hiringai-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ""
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: hiringai
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: hiringai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hiringai-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hiringai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: hiringai
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app
+      - resume_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hiringai-worker
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: hiringai
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      WORKER_ID: worker-1
+      WORKER_CONCURRENCY: "3"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app
+      - resume_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    command: python -u worker.py
+
+  worker-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hiringai-worker-2
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: hiringai
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      WORKER_ID: worker-2
+      WORKER_CONCURRENCY: "3"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app
+      - resume_media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    command: python -u worker.py
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: hiringai-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    # VITE_API_URL is intentionally empty: requests go through the Vite dev proxy
+    # (see vite.config.js server.proxy) so no cross-origin requests are made.
+    environment:
+      VITE_API_URL: ""
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.js:/app/vite.config.js
+      - ./frontend/.env:/app/.env
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+
+volumes:
+  db_data:
+  qdrant_data:
+  resume_media:

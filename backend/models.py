@@ -123,3 +123,20 @@ class Notification(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User")
+
+class ScreeningJob(Base):
+    __tablename__ = "screening_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(String(36), index=True, nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    jd_text = Column(Text, nullable=False)
+    top_n = Column(Integer, default=10)
+    status = Column(String(20), default="pending", index=True)
+    retry_count = Column(Integer, default=0)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
